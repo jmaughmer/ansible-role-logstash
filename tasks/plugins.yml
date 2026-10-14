@@ -1,0 +1,16 @@
+---
+# Running hosts with a pending upgrade get their plugins handled during the
+# rolling upgrade, after the new package is installed.
+- name: Plugins | Synchronise plugins
+  ansible.builtin.include_tasks: plugins_sync.yml
+  vars:
+    _ls_plugin_host: "{{ inventory_hostname }}"
+    _ls_plugin_after_upgrade: "{{ _ls_upgraded_offline | bool }}"
+  when:
+    - not (_ls_upgrade_pending | bool)
+    - logstash_plugins | length > 0
+
+- name: Plugins | Flag restart for plugin changes
+  ansible.builtin.set_fact:
+    _ls_restart_required: true
+  when: _ls_plugins_changed | default(false) | bool

@@ -1,0 +1,13 @@
+---
+logstash_heap_size: "4g"
+
+ssl_certificates:
+  - name: "ls-1.example.com"
+    certificate:
+      content: |
+        -----BEGIN CERTIFICATE-----
+        REPLACE-WITH-NODE-CERTIFICATE
+        -----END CERTIFICATE-----
+    key:
+      content: |
+        REPLACE-WITH-VAULTED-PRIVATE-KEY

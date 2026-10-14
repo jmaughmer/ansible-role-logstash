@@ -1,0 +1,157 @@
+---
+# Package source (logstash_repo_source): elastic or satellite. With `none`
+# this file is not included.
+
+# ------------------------------------------------------------------ elastic
+- name: Repository | Elastic repository
+  when: logstash_repo_source == 'elastic'
+  block:
+    - name: Repository | Import Elastic GPG key
+      ansible.builtin.rpm_key:
+        key: "{{ logstash_repo_gpgkey }}"
+        state: present
+      register: _ls_rpm_key
+      until: _ls_rpm_key is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      when: logstash_repo_gpgcheck | bool
+
+    # Disabled by default so `dnf update` never upgrades Logstash outside the role.
+    - name: Repository | Configure Logstash repository
+      ansible.builtin.yum_repository:
+        name: "{{ _ls_repo_name }}"
+        description: "Elastic {{ _ls_major_version }}.x packages (Logstash)"
+        file: logstash
+        baseurl: "{{ logstash_repo_baseurl }}"
+        gpgcheck: "{{ logstash_repo_gpgcheck | bool }}"
+        gpgkey: "{{ logstash_repo_gpgkey }}"
+        timeout: "{{ logstash_repo_timeout }}"
+        retries: "{{ logstash_repo_retries }}"
+        enabled: false
+
+# ---------------------------------------------------------------- satellite
+# The repository comes from Red Hat Satellite / Katello through
+# subscription-manager, which owns redhat.repo. The role only reads it, and
+# changes it through subscription-manager (enabled state, content overrides).
+- name: Repository | Red Hat Satellite / Katello repository
+  when: logstash_repo_source == 'satellite'
+  block:
+    # Installed by default on RHEL; AlmaLinux and Rocky Linux hosts get it when
+    # they are registered to Katello.
+    - name: Repository | Check for subscription-manager
+      ansible.builtin.stat:
+        path: /usr/sbin/subscription-manager
+      register: _ls_sat_subman
+
+    - name: Repository | Verify subscription-manager is installed
+      ansible.builtin.assert:
+        that:
+          - _ls_sat_subman.stat.exists
+        fail_msg: >-
+          logstash_repo_source is satellite, but subscription-manager is not installed on
+          {{ inventory_hostname }} ({{ ansible_facts['distribution'] }}
+          {{ ansible_facts['distribution_version'] }}). Install it and register the host to
+          Red Hat Satellite or Katello first.
+        quiet: true
+
+    # Prevents installing from two sources after switching from the public repository
+    - name: Repository | Remove the role's Elastic repository definition
+      ansible.builtin.yum_repository:
+        name: "{{ _ls_repo_name }}"
+        file: logstash
+        state: absent
+
+    - name: Repository | Look up the Satellite repository
+      ansible.builtin.script:
+        cmd: "repo_lookup.py {{ logstash_satellite_repo_id | quote }} elastic logstash"
+        executable: "{{ _ls_python }}"
+      register: _ls_sat_lookup
+      until: _ls_sat_lookup is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: false
+      check_mode: false
+
+    # New content (e.g. a freshly promoted content view) reaches redhat.repo
+    # only after subscription-manager refreshes.
+    - name: Repository | Refresh subscription-manager content
+      ansible.builtin.command:
+        cmd: subscription-manager refresh
+      register: _ls_sat_refresh
+      until: _ls_sat_refresh is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      when:
+        - not (_ls_sat_lookup.stdout | from_json).found
+        - logstash_satellite_refresh | bool
+
+    - name: Repository | Look up the Satellite repository after refresh
+      ansible.builtin.script:
+        cmd: "repo_lookup.py {{ logstash_satellite_repo_id | quote }} elastic logstash"
+        executable: "{{ _ls_python }}"
+      register: _ls_sat_lookup_refreshed
+      until: _ls_sat_lookup_refreshed is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: false
+      check_mode: false
+      when: _ls_sat_refresh is changed
+
+    - name: Repository | Record Satellite repository state
+      ansible.builtin.set_fact:
+        _ls_sat_repo: >-
+          {{ ((_ls_sat_lookup_refreshed if _ls_sat_refresh is changed else _ls_sat_lookup).stdout) | from_json }}
+
+    - name: Repository | Verify the Satellite repository is available
+      ansible.builtin.assert:
+        that:
+          - _ls_sat_repo.found
+        fail_msg: >-
+          Repository '{{ logstash_satellite_repo_id }}' is not available on {{ inventory_hostname }}.
+          Check that the host is registered to Satellite and that its content view and lifecycle
+          environment include the repository (`subscription-manager repos --list`).
+          {% if _ls_sat_repo.candidates | length > 0 %}Repository ids on this host that look related:
+          {{ _ls_sat_repo.candidates | join(', ') }}.{% endif %}
+        quiet: true
+
+    - name: Repository | Set the Satellite repository enabled state
+      ansible.builtin.command:
+        argv:
+          - subscription-manager
+          - repos
+          - "--{{ 'enable' if logstash_satellite_repo_state == 'enabled' else 'disable' }}={{ logstash_satellite_repo_id }}"
+      register: _ls_sat_repo_state
+      until: _ls_sat_repo_state is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: true
+      when:
+        - logstash_satellite_repo_state != 'unmanaged'
+        - _ls_sat_repo.enabled != (logstash_satellite_repo_state == 'enabled')
+
+    - name: Repository | Apply Satellite content overrides
+      ansible.builtin.command:
+        argv:
+          - subscription-manager
+          - repo-override
+          - "--repo={{ logstash_satellite_repo_id }}"
+          - "--add={{ item.key }}:{{ item.value }}"
+      loop: "{{ logstash_satellite_repo_overrides | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}={{ item.value }}"
+      register: _ls_sat_overrides
+      until: _ls_sat_overrides is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: true
+      when: (_ls_sat_repo.options[item.key | lower] | default('') | string) != (item.value | string)
+
+    - name: Repository | Import GPG key for the Satellite repository
+      ansible.builtin.rpm_key:
+        key: "{{ logstash_satellite_gpgkey }}"
+        state: present
+      register: _ls_sat_rpm_key
+      until: _ls_sat_rpm_key is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      when: logstash_satellite_gpgkey | length > 0

@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Pipeline: {{ _ls_pipeline.id }}
+{% if _ls_pipeline.config is defined %}
+
+{{ _ls_pipeline.config }}
+{% endif %}
+{% for tpl in _ls_pipeline.templates | default([]) %}
+
+# ---- {{ tpl }} ----
+{% include tpl %}
+{% endfor %}

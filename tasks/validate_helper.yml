@@ -1,0 +1,12 @@
+---
+# Written before the fapolicyd trust entries are refreshed, because on a host
+# running fapolicyd the helper has to be trusted before pipelines.yml runs it.
+- name: Pipelines | Install pipeline validation helper
+  ansible.builtin.template:
+    src: validate-pipeline.sh.j2
+    dest: "{{ _ls_validate_script }}"
+    owner: root
+    group: root
+    mode: "0750"
+  register: _ls_validate_helper
+  when: logstash_pipeline_validate | bool

@@ -1,0 +1,37 @@
+---
+# Resilience settings for hosts behind high-latency, low-bandwidth satellite
+# links. The role defaults suit ordinary networks; these values trade run time
+# for tolerance of slow and flaky links. Connection-level settings (SSH
+# reconnects, keepalives, timeouts) are in ../ansible.cfg.
+#
+# Rough worst-case per retried task: retries x (delay + attempt duration).
+
+# Retries for downloads (GPG key, packages, plugins)
+logstash_task_retries: 8
+logstash_task_delay: 60
+
+# Package/plugin downloads run as async jobs: they keep running on the host when
+# the SSH session drops and Ansible polls for the result.
+logstash_download_async_timeout: 14400    # 4 h per attempt
+logstash_download_async_poll: 60
+
+# dnf per-request timeout and download retries. dnf aborts a download slower
+# than its minimum rate (1 kB/s) only after `timeout` seconds.
+logstash_repo_timeout: 600
+logstash_repo_retries: 20
+logstash_dnf_lock_timeout: 1800
+
+# With logstash_repo_source: satellite the repository comes from redhat.repo, which
+# cannot be edited; set its dnf timeout/retries as Satellite content overrides:
+# logstash_satellite_repo_overrides:
+#   timeout: "600"
+#   retries: "20"
+
+# Per-request HTTP timeout for Logstash API calls
+logstash_api_timeout: 180
+
+# Polling loops that wait for pipelines and for the service to stop
+logstash_api_retries: 180
+logstash_api_delay: 20
+logstash_stop_retries: 180
+logstash_stop_delay: 20

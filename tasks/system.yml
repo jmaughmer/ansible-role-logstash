@@ -1,0 +1,85 @@
+---
+- name: System | Create systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/logstash.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: System | Configure systemd drop-in (limits, priority, stop timeout)
+  ansible.builtin.template:
+    src: systemd-override.conf.j2
+    dest: /etc/systemd/system/logstash.service.d/override.conf
+    owner: root
+    group: root
+    mode: "0644"
+  register: _ls_systemd_override
+
+- name: System | Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _ls_systemd_override is changed
+
+# Read by the packaged unit (EnvironmentFile=-/etc/sysconfig/logstash)
+- name: System | Configure service environment
+  ansible.builtin.template:
+    src: sysconfig.j2
+    dest: /etc/sysconfig/logstash
+    owner: root
+    group: root
+    mode: "0600"
+  register: _ls_sysconfig
+  no_log: "{{ logstash_no_log }}"
+  diff: false
+
+- name: System | Flag restart for service changes
+  ansible.builtin.set_fact:
+    _ls_restart_required: true
+  when: _ls_systemd_override is changed or _ls_sysconfig is changed
+
+- name: System | Check whether firewalld is running
+  ansible.builtin.command:
+    cmd: systemctl is-active firewalld
+  register: _ls_firewalld_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - logstash_manage_firewall | bool
+    - (logstash_firewall_ports | length > 0) or (logstash_firewall_services | length > 0)
+
+- name: System | Open input ports in firewalld
+  ansible.posix.firewalld:
+    port: "{{ item }}"
+    zone: "{{ logstash_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ logstash_firewall_ports }}"
+  when:
+    - logstash_manage_firewall | bool
+    - (_ls_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: System | Open input services in firewalld
+  ansible.posix.firewalld:
+    service: "{{ item }}"
+    zone: "{{ logstash_firewall_zone }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop: "{{ logstash_firewall_services }}"
+  when:
+    - logstash_manage_firewall | bool
+    - (_ls_firewalld_state.stdout | default('') | trim) == 'active'
+
+- name: System | Report that firewalld is not running
+  ansible.builtin.debug:
+    msg: >-
+      logstash_manage_firewall is on but firewalld is not running on {{ inventory_hostname }}, so
+      no rules were added. The input ports {{ logstash_firewall_ports | join(', ') }} have to be
+      reachable however this host filters traffic.
+  when:
+    - logstash_manage_firewall | bool
+    - (logstash_firewall_ports | length > 0) or (logstash_firewall_services | length > 0)
+    - (_ls_firewalld_state.stdout | default('') | trim) != 'active'

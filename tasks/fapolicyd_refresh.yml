@@ -1,0 +1,45 @@
+---
+# Rewrites the fapolicyd trust entries on one host. The entries hold a size and
+# a checksum per file, so they are rewritten whenever the files they cover
+# change: in phase 1, and during a rolling upgrade once the plugins have been
+# reconciled and updated for the new version, before Logstash starts again.
+# Inputs:
+#   _ls_fapolicyd_host   host to act on (tasks are delegated to it); its
+#                        _ls_fapolicyd_trust fact gives the paths and the trust file
+
+- name: "fapolicyd | Check which paths exist on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.paths }}"
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  register: _ls_fapolicyd_path_stat
+
+- name: "fapolicyd | Remove the previous trust entries on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.file:
+    path: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.path }}"
+    state: absent
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+
+- name: "fapolicyd | Trust the files Logstash runs on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv:
+      - /usr/sbin/fapolicyd-cli
+      - --file
+      - add
+      - "{{ item }}"
+      - --trust-file
+      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.name }}"
+  loop: "{{ _ls_fapolicyd_path_stat.results | selectattr('stat.exists') | map(attribute='item') | list }}"
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  register: _ls_fapolicyd_added
+  until: _ls_fapolicyd_added is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  changed_when: true
+
+- name: "fapolicyd | Load the trust database on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.command:
+    cmd: /usr/sbin/fapolicyd-cli --update
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  changed_when: true
+  when: _ls_fapolicyd_added is changed

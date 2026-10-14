@@ -1,0 +1,71 @@
+---
+- name: Service | Enable Logstash service
+  ansible.builtin.systemd_service:
+    name: logstash
+    enabled: true
+
+# New and stopped hosts are started in parallel - they carry no traffic yet.
+- name: Service | Start Logstash on hosts that are not running
+  ansible.builtin.systemd_service:
+    name: logstash
+    state: started
+    no_block: true
+  register: _ls_service_started
+  when: not (_ls_is_running | bool)
+
+- name: Service | Wait for pipelines on started hosts
+  ansible.builtin.include_tasks: wait_pipelines.yml
+  vars:
+    _ls_wait_host: "{{ inventory_hostname }}"
+    _ls_wait_reloaded_ids: []
+  when: _ls_service_started is changed
+
+- name: Service | Determine hosts that need a rolling restart
+  ansible.builtin.set_fact:
+    _ls_needs_rolling: >-
+      {{ (_ls_is_running | bool)
+         and ((_ls_upgrade_pending | bool)
+              or (logstash_force_restart | bool)
+              or ((_ls_restart_required | bool) and (logstash_restart_on_change | bool))) }}
+
+- name: Service | Report restarts that were skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ inventory_hostname }} has changes that require a restart, but logstash_restart_on_change is
+      false. Restart it manually or re-run with -e logstash_force_restart=true.
+  when:
+    - _ls_is_running | bool
+    - _ls_restart_required | bool
+    - not (logstash_restart_on_change | bool)
+
+# Pipeline changes on running hosts that are not about to be restarted are
+# applied by Logstash's pipeline reload (only changed pipelines restart).
+- name: Service | Apply pipeline changes by reload
+  when:
+    - _ls_is_running | bool
+    - _ls_pipelines_changed | bool
+    - logstash_pipeline_change_action == 'reload'
+    - not (_ls_needs_rolling | bool)
+  block:
+    # SIGHUP goes to the main process by PID: `systemctl kill --kill-whom` only
+    # exists from systemd 252 (RHEL 9.2), and without it systemctl would signal
+    # every process in the unit's cgroup.
+    - name: Service | Signal Logstash to reload pipelines
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          main_pid=$(systemctl show --property MainPID --value logstash)
+          if [ -z "$main_pid" ] || [ "$main_pid" = "0" ]; then
+            echo "logstash is not running, so it cannot be signalled to reload" >&2
+            exit 1
+          fi
+          kill -HUP "$main_pid"
+        executable: /bin/bash
+      changed_when: true
+      when: not (logstash_config_reload_automatic | bool)
+
+    - name: Service | Wait for pipeline reload
+      ansible.builtin.include_tasks: wait_pipelines.yml
+      vars:
+        _ls_wait_host: "{{ inventory_hostname }}"
+        _ls_wait_reloaded_ids: "{{ _ls_pipelines_reloaded_ids }}"

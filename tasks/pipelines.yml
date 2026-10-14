@@ -1,0 +1,88 @@
+---
+- name: Pipelines | Create pipeline directory
+  ansible.builtin.file:
+    path: "{{ logstash_pipeline_dir }}"
+    state: directory
+    owner: root
+    group: logstash
+    mode: "0750"
+
+# Used afterwards to confirm that changed pipelines actually reloaded.
+- name: Pipelines | Snapshot pipeline reload statistics
+  ansible.builtin.uri:
+    url: "{{ _ls_api_url }}/_node/stats/pipelines?filter_path=pipelines.*.reloads"
+    url_username: "{{ logstash_api_auth_basic_username if _ls_api_auth | bool else omit }}"
+    url_password: "{{ logstash_api_auth_basic_password if _ls_api_auth | bool else omit }}"
+    force_basic_auth: "{{ _ls_api_auth | bool }}"
+    timeout: "{{ logstash_api_timeout }}"
+  register: _ls_reload_snapshot
+  failed_when: false
+  check_mode: false
+  when:
+    - _ls_is_running | bool
+    - logstash_pipeline_change_action == 'reload'
+
+# Order matters with automatic reload: new pipeline files first, then
+# pipelines.yml, then removal of files no longer referenced.
+- name: Pipelines | Validate and write pipeline definitions
+  ansible.builtin.template:
+    src: pipeline.conf.j2
+    dest: "{{ logstash_pipeline_dir }}/{{ _ls_pipeline.id }}.conf"
+    owner: root
+    group: logstash
+    mode: "0640"
+    validate: "{{ (_ls_validate_script ~ ' %s') if logstash_pipeline_validate | bool else omit }}"
+  environment: "{{ _ls_keystore_env | combine(logstash_environment) }}"
+  loop: "{{ _ls_pipelines_present | rejectattr('path_config', 'defined') | list }}"
+  loop_control:
+    loop_var: _ls_pipeline
+    label: "{{ _ls_pipeline.id }}"
+  register: _ls_pipeline_files
+
+- name: Pipelines | Render pipelines.yml
+  ansible.builtin.template:
+    src: pipelines.yml.j2
+    dest: "{{ logstash_conf_dir }}/pipelines.yml"
+    owner: root
+    group: logstash
+    mode: "0640"
+  register: _ls_pipelines_yml
+
+- name: Pipelines | Find pipeline files
+  ansible.builtin.find:
+    paths: "{{ logstash_pipeline_dir }}"
+    patterns: ["*.conf"]
+    file_type: file
+  register: _ls_pipeline_found
+
+- name: Pipelines | Remove absent and unmanaged pipeline files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  vars:
+    _ls_found_paths: "{{ _ls_pipeline_found.files | map(attribute='path') | list }}"
+    _ls_keep_paths: >-
+      {{ _ls_pipelines_present | rejectattr('path_config', 'defined') | map(attribute='id')
+         | map('regex_replace', '^', logstash_pipeline_dir ~ '/') | map('regex_replace', '$', '.conf') | list }}
+    _ls_absent_paths: >-
+      {{ _ls_pipelines_absent | map(attribute='id')
+         | map('regex_replace', '^', logstash_pipeline_dir ~ '/') | map('regex_replace', '$', '.conf') | list }}
+  loop: >-
+    {{ (_ls_found_paths | difference(_ls_keep_paths)) if logstash_pipelines_purge | bool
+       else (_ls_found_paths | intersect(_ls_absent_paths)) }}
+  register: _ls_pipeline_removed
+
+- name: Pipelines | Record pipeline changes
+  ansible.builtin.set_fact:
+    _ls_pipelines_changed: >-
+      {{ _ls_pipeline_files is changed or _ls_pipelines_yml is changed or _ls_pipeline_removed is changed }}
+    _ls_pipelines_reloaded_ids: >-
+      {{ _ls_pipeline_files.results | default([]) | selectattr('changed') | map(attribute='_ls_pipeline.id')
+         | select('in', (_ls_reload_snapshot.json.pipelines | default({})).keys() | list) | list }}
+
+- name: Pipelines | Flag restart for pipeline changes
+  ansible.builtin.set_fact:
+    _ls_restart_required: true
+  when:
+    - _ls_pipelines_changed | bool
+    - logstash_pipeline_change_action == 'restart'

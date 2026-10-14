@@ -1,0 +1,41 @@
+---
+- name: Facts | Gather system facts needed for tuning checks
+  ansible.builtin.setup:
+    gather_subset: [min, hardware]
+  register: _ls_setup
+  until: _ls_setup is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  when: ansible_facts['mounts'] is not defined or ansible_facts['memtotal_mb'] is not defined
+
+- name: Facts | Query installed Logstash package version
+  ansible.builtin.command:
+    cmd: rpm -q --queryformat '%{VERSION}' logstash
+  register: _ls_rpm_query
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Query Logstash service state
+  ansible.builtin.command:
+    cmd: systemctl is-active logstash
+  register: _ls_service_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Facts | Set Logstash facts
+  ansible.builtin.set_fact:
+    _ls_installed_version: "{{ (_ls_rpm_query.stdout | trim) if _ls_rpm_query.rc == 0 else '' }}"
+    _ls_is_running: "{{ (_ls_service_state.stdout | trim) == 'active' }}"
+    _ls_target_version: "{{ logstash_version }}"
+    _ls_plugins_raw: "{{ logstash_plugins }}"
+    _ls_api_url: "http://{{ _ls_api_client_host }}:{{ logstash_api_http_port }}"
+    _ls_restart_required: false
+    _ls_pipelines_changed: false
+    _ls_upgrade_pending: false
+    _ls_upgraded_offline: false
+
+- name: Facts | Derive version facts
+  ansible.builtin.set_fact:
+    _ls_version_changing: "{{ (_ls_installed_version | length) > 0 and _ls_installed_version != logstash_version }}"

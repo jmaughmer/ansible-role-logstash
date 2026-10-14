@@ -1,0 +1,19 @@
+---
+galaxy_info:
+  role_name: logstash
+  author: Justin Maughmer
+  description: Install and configure Logstash 9.x on RHEL, AlmaLinux and Rocky Linux 9/10 with multiple pipelines, persisted queues, tuning and rolling restarts
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    # EL: RHEL, AlmaLinux and Rocky Linux
+    - name: EL
+      versions:
+        - "9"
+        - "10"
+  galaxy_tags:
+    - logstash
+    - elastic
+    - logging
+
+dependencies: []

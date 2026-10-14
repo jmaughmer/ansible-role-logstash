@@ -1,0 +1,69 @@
+---
+# Waits until a host runs exactly its managed pipelines and, optionally, until
+# changed pipelines have been reloaded successfully.
+# Inputs:
+#   _ls_wait_host            host to check (API calls are delegated to it)
+#   _ls_wait_reloaded_ids    pipeline ids expected to reload (default: none)
+
+- name: "Wait | Pipelines running on {{ _ls_wait_host }}"
+  ansible.builtin.uri:
+    url: "{{ hostvars[_ls_wait_host]._ls_api_url }}/_node/pipelines"
+    url_username: "{{ logstash_api_auth_basic_username if _ls_api_auth | bool else omit }}"
+    url_password: "{{ logstash_api_auth_basic_password if _ls_api_auth | bool else omit }}"
+    force_basic_auth: "{{ _ls_api_auth | bool }}"
+    timeout: "{{ logstash_api_timeout }}"
+  delegate_to: "{{ _ls_wait_host }}"
+  register: _ls_wait_pipelines
+  until:
+    - (_ls_wait_pipelines.status | default(-1)) == 200
+    - >-
+      (_ls_wait_pipelines.json.pipelines | default({})).keys() | list | reject('match', '^[.]') | sort
+      == hostvars[_ls_wait_host]._ls_expected_pipeline_ids | sort
+  retries: "{{ logstash_api_retries }}"
+  delay: "{{ logstash_api_delay }}"
+
+- name: "Wait | Changed pipelines reloaded on {{ _ls_wait_host }}"
+  vars:
+    _ls_snapshot: "{{ hostvars[_ls_wait_host]._ls_reload_snapshot.json.pipelines | default({}) }}"
+    _ls_reload_pending: >-
+      {%- set ns = namespace(count=0) -%}
+      {%- for id in _ls_wait_reloaded_ids -%}
+      {%-   set now = (_ls_wait_stats.json.pipelines | default({}))[id].reloads | default({}) -%}
+      {%-   set before = _ls_snapshot[id].reloads | default({}) -%}
+      {%-   if (now.successes | default(0) | int) + (now.failures | default(0) | int)
+              <= (before.successes | default(0) | int) + (before.failures | default(0) | int) -%}
+      {%-     set ns.count = ns.count + 1 -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.count }}
+  ansible.builtin.uri:
+    url: "{{ hostvars[_ls_wait_host]._ls_api_url }}/_node/stats/pipelines?filter_path=pipelines.*.reloads"
+    url_username: "{{ logstash_api_auth_basic_username if _ls_api_auth | bool else omit }}"
+    url_password: "{{ logstash_api_auth_basic_password if _ls_api_auth | bool else omit }}"
+    force_basic_auth: "{{ _ls_api_auth | bool }}"
+    timeout: "{{ logstash_api_timeout }}"
+  delegate_to: "{{ _ls_wait_host }}"
+  register: _ls_wait_stats
+  until:
+    - (_ls_wait_stats.status | default(-1)) == 200
+    - _ls_reload_pending | int == 0
+  retries: "{{ logstash_api_retries }}"
+  delay: "{{ logstash_api_delay }}"
+  when: _ls_wait_reloaded_ids | default([]) | length > 0
+
+- name: "Wait | Verify reloads succeeded on {{ _ls_wait_host }}"
+  vars:
+    _ls_reloads: "{{ _ls_wait_stats.json.pipelines[item].reloads | default({}) }}"
+    _ls_last_failure: "{{ _ls_reloads.last_failure_timestamp | default(none) }}"
+    _ls_last_success: "{{ _ls_reloads.last_success_timestamp | default(none) }}"
+  ansible.builtin.assert:
+    that:
+      - >-
+        _ls_last_failure is none or _ls_last_failure | length == 0
+        or (_ls_last_success is not none and _ls_last_success | length > 0
+            and _ls_last_success > _ls_last_failure)
+    fail_msg: >-
+      Pipeline '{{ item }}' failed to reload on {{ _ls_wait_host }}; Logstash keeps running the
+      previous version. Error: {{ (_ls_reloads.last_error | default(none) or {}).message | default('see logstash-plain.log') }}
+    quiet: true
+  loop: "{{ _ls_wait_reloaded_ids | default([]) }}"

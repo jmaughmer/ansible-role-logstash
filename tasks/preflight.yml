@@ -1,0 +1,229 @@
+---
+- name: Preflight | Verify operating system is supported
+  ansible.builtin.assert:
+    that:
+      - logstash_supported_distributions is sequence
+      - logstash_supported_distributions is not string
+      - ansible_facts['os_family'] == 'RedHat'
+      - ansible_facts['distribution'] in logstash_supported_distributions
+      - ansible_facts['distribution_major_version'] in ['9', '10']
+    fail_msg: >-
+      Unsupported platform {{ ansible_facts['distribution'] }}
+      {{ ansible_facts['distribution_version'] }}. Supported: major version 9 or 10 of
+      {{ logstash_supported_distributions | join(', ') }} (logstash_supported_distributions).
+    quiet: true
+
+- name: Preflight | Verify the play is not serialized
+  ansible.builtin.assert:
+    that:
+      - ansible_play_hosts | difference(ansible_play_batch) | length == 0
+    fail_msg: >-
+      Do not use `serial` on plays that apply this role; restarts are batched by the role
+      (logstash_restart_batch_size).
+    quiet: true
+  run_once: true
+
+- name: Preflight | Verify Logstash version
+  ansible.builtin.assert:
+    that:
+      - logstash_version is match('^9[.][0-9]+[.][0-9]+$')
+      - _ls_installed_version == '' or _ls_installed_version is version(logstash_version, '<=')
+      - _ls_installed_version == '' or _ls_installed_version.split('.')[0] == _ls_major_version
+    fail_msg: >-
+      logstash_version must be an exact 9.x.y release; downgrades and major upgrades are not
+      supported (installed: '{{ _ls_installed_version }}', requested: '{{ logstash_version }}').
+    quiet: true
+
+- name: Preflight | Verify package source settings
+  ansible.builtin.assert:
+    that:
+      - logstash_manage_repo is not defined
+      - logstash_repo_source in ['elastic', 'satellite', 'none']
+      - logstash_repo_source != 'satellite' or logstash_satellite_repo_id | length > 0
+      - logstash_satellite_repo_state in ['unmanaged', 'enabled', 'disabled']
+      - logstash_satellite_repo_overrides is mapping
+      - logstash_satellite_repo_overrides.keys() | map('lower') | intersect(['enabled', 'baseurl', 'name']) | length == 0
+    fail_msg: >-
+      logstash_repo_source must be elastic, satellite or none (logstash_manage_repo was replaced:
+      use logstash_repo_source: none instead of false). Satellite needs logstash_satellite_repo_id;
+      logstash_satellite_repo_state must be unmanaged, enabled or disabled; and
+      logstash_satellite_repo_overrides cannot set enabled (use the state setting), baseurl or name.
+    quiet: true
+
+- name: Preflight | Verify JVM heap size
+  ansible.builtin.assert:
+    that:
+      - (logstash_heap_size | string) is match('^[0-9]+[mMgG]$')
+    fail_msg: "logstash_heap_size must look like '4g' or '4096m' (got '{{ logstash_heap_size }}')."
+    quiet: true
+
+- name: Preflight | Warn when heap leaves little memory for the OS
+  ansible.builtin.debug:
+    msg: >-
+      logstash_heap_size {{ logstash_heap_size }} is more than 50% of the
+      {{ ansible_facts['memtotal_mb'] }} MB of RAM on {{ inventory_hostname }}. Leave memory for
+      direct buffers and the page cache (persisted queues rely on it).
+  when:
+    - ansible_facts['memtotal_mb'] is defined
+    - (logstash_heap_size | string | upper | human_to_bytes) > (ansible_facts['memtotal_mb'] | int * 1048576 * 0.5)
+
+- name: Preflight | Verify restart and reload settings
+  ansible.builtin.assert:
+    that:
+      - logstash_pipeline_change_action in ['reload', 'restart']
+      - logstash_pipeline_change_action == 'reload' or not (logstash_config_reload_automatic | bool)
+      - logstash_restart_batch_size | int >= 1
+    fail_msg: >-
+      logstash_pipeline_change_action must be reload or restart ('restart' requires
+      logstash_config_reload_automatic: false) and logstash_restart_batch_size must be >= 1.
+    quiet: true
+
+- name: Preflight | Verify global tuning keys
+  ansible.builtin.assert:
+    that:
+      - logstash_pipeline_defaults.keys() | difference(_ls_pipeline_setting_map.keys()) | length == 0
+      - logstash_queue.keys() | difference(_ls_queue_setting_map.keys()) | length == 0
+      - logstash_dead_letter_queue.keys() | difference(_ls_dlq_setting_map.keys()) | length == 0
+      - (logstash_queue.type | default('memory')) in ['memory', 'persisted']
+    fail_msg: >-
+      Unknown key in logstash_pipeline_defaults ({{ _ls_pipeline_setting_map.keys() | list }}),
+      logstash_queue ({{ _ls_queue_setting_map.keys() | list }}) or logstash_dead_letter_queue
+      ({{ _ls_dlq_setting_map.keys() | list }}), or invalid queue type.
+    quiet: true
+
+- name: Preflight | Verify pipeline definitions
+  ansible.builtin.assert:
+    that:
+      - item is mapping
+      - item.id is defined and (item.id | string) is match('^[A-Za-z0-9][A-Za-z0-9_.-]*$')
+      - item.keys() | difference(_ls_pipeline_item_keys) | length == 0
+      - (item.state | default('present')) in ['present', 'absent']
+      - >-
+        (item.state | default('present')) == 'absent'
+        or ((item.config is defined or item.templates is defined) != (item.path_config is defined))
+      - (item.queue | default({})).keys() | difference(_ls_queue_setting_map.keys()) | length == 0
+      - (item.dead_letter_queue | default({})).keys() | difference(_ls_dlq_setting_map.keys()) | length == 0
+      - ((item.queue | default({})).type | default('memory')) in ['memory', 'persisted']
+      - item.templates is not defined or (item.templates is sequence and item.templates is not string)
+    fail_msg: >-
+      Invalid pipeline '{{ item.id | default('?') }}'. Allowed keys: {{ _ls_pipeline_item_keys | join(', ') }}.
+      A present pipeline needs config and/or templates, or path_config (not both); queue keys:
+      {{ _ls_queue_setting_map.keys() | list | join(', ') }}; dead_letter_queue keys:
+      {{ _ls_dlq_setting_map.keys() | list | join(', ') }}.
+    quiet: true
+  loop: "{{ logstash_pipelines }}"
+  loop_control:
+    label: "{{ item.id | default('?') }}"
+
+# After the per-item checks, so a pipeline without an id fails with the message
+# above instead of an error from the expressions below.
+- name: Preflight | Verify at least one pipeline is defined
+  ansible.builtin.assert:
+    that:
+      - _ls_pipelines_present | length > 0
+      - logstash_pipelines | map(attribute='id') | list | length == logstash_pipelines | map(attribute='id') | unique | list | length
+    fail_msg: logstash_pipelines needs at least one present pipeline and pipeline ids must be unique.
+    quiet: true
+
+- name: Preflight | Record the pipelines this host should run
+  ansible.builtin.set_fact:
+    _ls_expected_pipeline_ids: "{{ _ls_pipeline_ids }}"
+
+- name: Preflight | Verify plugin definitions
+  ansible.builtin.assert:
+    that:
+      - item is string or (item is mapping and item.name is defined)
+      - item is string or (item.state | default('present')) in ['present', 'absent']
+    fail_msg: "Plugins must be a name or a dict with name and optional version, source, state."
+    quiet: true
+  loop: "{{ logstash_plugins }}"
+  loop_control:
+    label: "{{ item.name | default(item) }}"
+
+- name: Preflight | Verify TLS certificate entries
+  ansible.builtin.assert:
+    that:
+      - _ls_ssl_entries | map(attribute='name') | list | sort == logstash_ssl_certificate_names | unique | sort
+      - >-
+        _ls_ssl_entries | rejectattr('certificate.content', 'defined')
+        | rejectattr('certificate.path', 'defined') | list | length == 0
+      - >-
+        _ls_ssl_entries | rejectattr('key.content', 'defined')
+        | rejectattr('key.path', 'defined') | list | length == 0
+    fail_msg: >-
+      Every name in logstash_ssl_certificate_names ({{ logstash_ssl_certificate_names }}) must match an
+      entry in ssl_certificates or elastic_tls_ssl_certificates that has a certificate and a key, given as
+      content or as a path on the host.
+    quiet: true
+  no_log: "{{ logstash_no_log }}"
+
+- name: Preflight | Verify service capabilities
+  ansible.builtin.assert:
+    that:
+      - logstash_systemd_capabilities is sequence
+      - logstash_systemd_capabilities is not string
+      - logstash_systemd_capabilities | reject('match', '^CAP_[A-Z_]+$') | list | length == 0
+      - >-
+        (logstash_firewall_ports | map('regex_replace', '/.*$', '') | map('regex_replace', '-.*$', '')
+         | map('int') | select('lt', 1024) | list | length == 0)
+        or ('CAP_NET_BIND_SERVICE' in logstash_systemd_capabilities)
+    fail_msg: >-
+      logstash_systemd_capabilities entries must look like CAP_NET_BIND_SERVICE, and an input on a
+      port below 1024 ({{ logstash_firewall_ports }}) needs CAP_NET_BIND_SERVICE: Logstash runs as
+      the logstash user and cannot bind those ports otherwise. Add the capability, or move the input
+      to a high port and forward to it.
+    quiet: true
+
+- name: Preflight | Verify firewall settings
+  ansible.builtin.assert:
+    that:
+      - logstash_firewall_ports is sequence
+      - logstash_firewall_ports is not string
+      - logstash_firewall_services is sequence
+      - logstash_firewall_services is not string
+      - logstash_firewall_ports | reject('match', '^[0-9]+(-[0-9]+)?/(tcp|udp)$') | list | length == 0
+    fail_msg: >-
+      logstash_firewall_ports entries must look like 514/udp, 5044/tcp or 5000-5010/tcp
+      (got {{ logstash_firewall_ports }}), and logstash_firewall_services must be a list of
+      firewalld service names.
+    quiet: true
+
+- name: Preflight | Verify hardening settings
+  ansible.builtin.assert:
+    that:
+      - (logstash_selinux_manage | string | lower) in ['auto', 'true', 'false', 'yes', 'no']
+      - (logstash_fapolicyd_trust | string | lower) in ['auto', 'true', 'false', 'yes', 'no']
+      - logstash_selinux_fcontexts is mapping
+      - logstash_fapolicyd_trust_paths is sequence
+      - logstash_fapolicyd_trust_paths is not string
+    fail_msg: >-
+      logstash_selinux_manage and logstash_fapolicyd_trust must be auto, true or false,
+      logstash_selinux_fcontexts must be a mapping and logstash_fapolicyd_trust_paths a list.
+    quiet: true
+
+# The traditional encrypted PEM format derives its key with MD5, which a host
+# running in FIPS mode cannot use.
+- name: Preflight | Verify private keys can be read in FIPS mode
+  ansible.builtin.assert:
+    that:
+      - >-
+        _ls_ssl_entries | selectattr('key.content', 'defined') | map(attribute='key.content')
+        | select('search', 'Proc-Type: 4,ENCRYPTED') | list | length == 0
+    fail_msg: >-
+      A private key in logstash_ssl_certificate_names is in the traditional encrypted PEM format
+      (Proc-Type: 4,ENCRYPTED), whose key derivation uses MD5, and this host runs in FIPS mode.
+      Convert it first: openssl pkcs8 -topk8 -in old.key -out new.key
+    quiet: true
+  when: ansible_facts['fips'] | default(false) | bool
+  no_log: "{{ logstash_no_log }}"
+
+- name: Preflight | Verify secrets are safe for the systemd environment file
+  ansible.builtin.assert:
+    that:
+      - (logstash_keystore_password | string) is not search('["\\\\\n]')
+      - logstash_api_auth_basic_username | length == 0 or logstash_api_auth_basic_password | length > 0
+    fail_msg: >-
+      logstash_keystore_password must not contain double quotes, backslashes or newlines, and
+      logstash_api_auth_basic_password is required when a username is set.
+    quiet: true
+  no_log: "{{ logstash_no_log }}"

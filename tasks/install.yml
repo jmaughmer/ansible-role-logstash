@@ -1,0 +1,46 @@
+---
+- name: Install | Check the package source provides the requested version
+  ansible.builtin.import_tasks: package_version_check.yml
+  when:
+    - logstash_package_version_check | bool
+    - _ls_installed_version != logstash_version
+
+# Package downloads run as async jobs so a dropped SSH session does not abort
+# them, and are retried if the download itself fails.
+- name: Install | Install Logstash package
+  ansible.builtin.dnf:
+    name: "logstash-{{ logstash_version }}"
+    state: present
+    lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+    enablerepo: "{{ _ls_package_repos if _ls_package_repos | length > 0 else omit }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_package_install
+  until: _ls_package_install is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  when: _ls_installed_version | length == 0
+
+# Stopped hosts are upgraded in place; running hosts are upgraded one batch at
+# a time by restart_batch.yml.
+- name: Install | Upgrade Logstash package on a stopped host
+  ansible.builtin.dnf:
+    name: "logstash-{{ logstash_version }}"
+    state: present
+    allow_downgrade: false
+    lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+    enablerepo: "{{ _ls_package_repos if _ls_package_repos | length > 0 else omit }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_package_upgrade
+  until: _ls_package_upgrade is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  when:
+    - _ls_version_changing | bool
+    - not (_ls_is_running | bool)
+
+- name: Install | Record package state
+  ansible.builtin.set_fact:
+    _ls_upgraded_offline: "{{ _ls_package_upgrade is changed }}"
+    _ls_upgrade_pending: "{{ (_ls_version_changing | bool) and (_ls_is_running | bool) }}"

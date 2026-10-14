@@ -1,0 +1,100 @@
+---
+- name: Queues | Create queue and dead letter queue base directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: logstash
+    group: logstash
+    mode: "0750"
+  loop: "{{ (_ls_queue_base_dirs + _ls_dlq_base_dirs) | unique }}"
+
+# ---------------------------------------------------------------------------
+# Effective persisted queue settings per pipeline (pipeline values override
+# logstash_queue; Logstash defaults: max_bytes 1024mb, page_capacity 64mb).
+# ---------------------------------------------------------------------------
+- name: Queues | Reset persisted queue plan
+  ansible.builtin.set_fact:
+    _ls_pq: []
+    _ls_pq_by_mount: {}
+
+- name: Queues | Build persisted queue plan
+  ansible.builtin.set_fact:
+    _ls_pq: >-
+      {{ _ls_pq + [{
+           'id': item.id,
+           'dir': (_ls_q.path | default(logstash_path_data ~ '/queue')) ~ '/' ~ item.id,
+           'max_bytes': (_ls_q.max_bytes | default('1024mb') | string | upper | human_to_bytes),
+           'page_capacity': (_ls_q.page_capacity | default('64mb') | string | upper | human_to_bytes)
+         }] }}
+  vars:
+    _ls_q: "{{ logstash_queue | combine(item.queue | default({})) }}"
+  loop: "{{ _ls_pipelines_present }}"
+  loop_control:
+    label: "{{ item.id }}"
+  when: (_ls_q.type | default('memory')) == 'persisted'
+
+- name: Queues | Verify page capacity fits within max_bytes
+  ansible.builtin.assert:
+    that:
+      - item.page_capacity <= item.max_bytes
+    fail_msg: >-
+      Pipeline '{{ item.id }}': queue.page_capacity ({{ item.page_capacity }} bytes) must not exceed
+      queue.max_bytes ({{ item.max_bytes }} bytes).
+    quiet: true
+  loop: "{{ _ls_pq }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Queues | Measure existing persisted queue usage
+  ansible.builtin.command:
+    argv: "{{ ['du', '-sb', '--'] + (_ls_pq | map(attribute='dir') | list) }}"
+  register: _ls_pq_du
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - logstash_queue_disk_check | bool
+    - _ls_pq | length > 0
+
+# Space still needed per filesystem = sum(max_bytes - bytes already used by that queue)
+- name: Queues | Sum queue capacity per filesystem
+  ansible.builtin.set_fact:
+    _ls_pq_by_mount: >-
+      {{ _ls_pq_by_mount | combine({_ls_mount: (_ls_pq_by_mount[_ls_mount] | default(0) | int)
+                                               + item.max_bytes - (_ls_pq_used[item.dir] | default(0) | int)}) }}
+  vars:
+    _ls_pq_used: >-
+      {{ dict((_ls_pq_du.stdout_lines | default([]) | map('regex_replace', '^[0-9]+\t', '') | list)
+              | zip(_ls_pq_du.stdout_lines | default([]) | map('regex_replace', '\t.*$', '') | map('int') | list)) }}
+    _ls_mount: >-
+      {%- set ns = namespace(mount='/', length=0) -%}
+      {%- for m in ansible_facts['mounts'] | default([]) -%}
+      {%-   set prefix = m.mount.rstrip('/') ~ '/' -%}
+      {%-   if (item.dir ~ '/').startswith(prefix) and (prefix | length) > ns.length -%}
+      {%-     set ns.mount = m.mount -%}
+      {%-     set ns.length = prefix | length -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ ns.mount }}
+  loop: "{{ _ls_pq }}"
+  loop_control:
+    label: "{{ item.id }}"
+  when:
+    - logstash_queue_disk_check | bool
+    - ansible_facts['mounts'] is defined
+
+- name: Queues | Verify filesystems can hold every persisted queue
+  ansible.builtin.assert:
+    that:
+      - item.value <= _ls_fs.size_available
+    fail_msg: >-
+      Persisted queues on {{ item.key }} may grow by {{ (item.value / 1073741824) | round(2) }} GiB
+      but only {{ (_ls_fs.size_available / 1073741824) | round(2) }} GiB is free. Lower queue.max_bytes,
+      move path.queue to a larger filesystem, or set logstash_queue_disk_check: false.
+    quiet: true
+  vars:
+    _ls_fs: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', item.key) | first }}"
+  loop: "{{ _ls_pq_by_mount | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: logstash_queue_disk_check | bool

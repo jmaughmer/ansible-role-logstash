@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+[Service]
+{% if logstash_systemd_limit_nofile | string | length > 0 %}
+LimitNOFILE={{ logstash_systemd_limit_nofile }}
+{% endif %}
+{% if logstash_systemd_nice | string | length > 0 %}
+Nice={{ logstash_systemd_nice }}
+{% endif %}
+{% if logstash_systemd_timeout_stop_sec | string | length > 0 %}
+TimeoutStopSec={{ logstash_systemd_timeout_stop_sec }}
+{% endif %}
+{% if logstash_systemd_capabilities | length > 0 %}
+AmbientCapabilities={{ logstash_systemd_capabilities | join(' ') }}
+CapabilityBoundingSet={{ logstash_systemd_capabilities | join(' ') }}
+{% endif %}

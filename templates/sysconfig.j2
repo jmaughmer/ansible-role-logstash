@@ -1,0 +1,8 @@
+# {{ ansible_managed }}
+# Environment for the logstash service (systemd EnvironmentFile syntax).
+{% if logstash_keystore_password | length > 0 %}
+LOGSTASH_KEYSTORE_PASS="{{ logstash_keystore_password }}"
+{% endif %}
+{% for name, value in logstash_environment | dictsort %}
+{{ name }}="{{ value | string | replace('\\', '\\\\') | replace('"', '\\"') }}"
+{% endfor %}

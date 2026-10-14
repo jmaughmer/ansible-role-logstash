@@ -1,0 +1,30 @@
+---
+- name: Configure | Render logstash.yml
+  ansible.builtin.template:
+    src: logstash.yml.j2
+    dest: "{{ logstash_conf_dir }}/logstash.yml"
+    owner: root
+    group: logstash
+    mode: "0640"
+  register: _ls_settings_file
+
+- name: Configure | Set JVM heap size
+  ansible.builtin.lineinfile:
+    path: "{{ logstash_conf_dir }}/jvm.options"
+    regexp: "^\\s*#?\\s*{{ item }}[0-9]+[kKmMgG]?\\s*$"
+    line: "{{ item }}{{ logstash_heap_size }}"
+  loop: ["-Xms", "-Xmx"]
+  register: _ls_jvm_heap
+
+- name: Configure | Manage additional JVM options
+  ansible.builtin.blockinfile:
+    path: "{{ logstash_conf_dir }}/jvm.options"
+    marker: "# {mark} ANSIBLE MANAGED JVM OPTIONS"
+    block: "{{ logstash_jvm_options | join('\n') }}"
+    state: "{{ 'present' if logstash_jvm_options | length > 0 else 'absent' }}"
+  register: _ls_jvm_extra
+
+- name: Configure | Flag restart for settings changes
+  ansible.builtin.set_fact:
+    _ls_restart_required: true
+  when: _ls_settings_file is changed or _ls_jvm_heap is changed or _ls_jvm_extra is changed

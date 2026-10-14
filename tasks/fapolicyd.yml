@@ -1,0 +1,60 @@
+---
+# fapolicyd only allows code it trusts, and its trust comes from the rpm
+# database. Neither the plugins logstash-plugin unpacks nor the pipeline
+# validation helper this role writes are installed by rpm, so both have to be
+# trusted explicitly or fapolicyd refuses to run them.
+- name: fapolicyd | Check whether fapolicyd is running
+  ansible.builtin.command:
+    cmd: systemctl is-active fapolicyd
+  register: _ls_fapolicyd_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: (logstash_fapolicyd_trust | string | lower) == 'auto'
+
+# Published as a fact: a rolling upgrade updates plugins on each host and
+# refreshes its entries from the host that runs the upgrade, which cannot see
+# this host's role variables through hostvars.
+- name: fapolicyd | Record what this host trusts
+  ansible.builtin.set_fact:
+    _ls_fapolicyd_trust: >-
+      {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file}
+         if _ls_fapolicyd_manage | bool else {} }}
+
+- name: fapolicyd | Manage the trust database
+  when: _ls_fapolicyd_manage | bool
+  block:
+    - name: fapolicyd | Verify fapolicyd-cli is available
+      ansible.builtin.stat:
+        path: /usr/sbin/fapolicyd-cli
+      register: _ls_fapolicyd_cli
+
+    - name: fapolicyd | Report a missing fapolicyd-cli
+      ansible.builtin.assert:
+        that:
+          - _ls_fapolicyd_cli.stat.exists
+        fail_msg: >-
+          logstash_fapolicyd_trust asks for trust entries, but /usr/sbin/fapolicyd-cli is not
+          installed on {{ inventory_hostname }}. Install the fapolicyd package, or set
+          logstash_fapolicyd_trust: false and trust {{ _ls_fapolicyd_paths | join(', ') }} another way.
+        quiet: true
+
+    - name: fapolicyd | Check the trust file
+      ansible.builtin.stat:
+        path: "{{ _ls_fapolicyd_trust_file }}"
+      register: _ls_fapolicyd_file
+
+    # The entries hold a size and a checksum per file, so they are rewritten
+    # whenever the files they cover have changed.
+    - name: fapolicyd | Refresh the trust entries
+      ansible.builtin.include_tasks:
+        file: fapolicyd_refresh.yml
+        apply:
+          tags: [logstash, logstash_plugins, logstash_pipelines]
+      vars:
+        _ls_fapolicyd_host: "{{ inventory_hostname }}"
+      when: >-
+        (not _ls_fapolicyd_file.stat.exists)
+        or (_ls_plugins_changed | default(false) | bool)
+        or (_ls_validate_helper is defined and _ls_validate_helper is changed)
+        or (logstash_fapolicyd_force_trust | bool)

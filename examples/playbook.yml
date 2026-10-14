@@ -1,0 +1,10 @@
+---
+- name: Deploy Logstash
+  hosts: logstash
+  become: true
+  gather_facts: true
+  # Stop the whole run if any host fails validation, before restarts begin.
+  any_errors_fatal: true
+  # Do NOT set `serial` here - restarts are batched by logstash_restart_batch_size.
+  roles:
+    - role: logstash

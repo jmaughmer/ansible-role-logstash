@@ -1,0 +1,112 @@
+---
+- name: Certificates | Create TLS directory
+  ansible.builtin.file:
+    path: "{{ logstash_ssl_dir }}"
+    state: directory
+    owner: root
+    group: logstash
+    mode: "0750"
+  when: _ls_ssl_entries | length > 0 or (logstash_ssl_ca_certificate | length) > 0 or (_ls_ssl_ca_path | length) > 0
+
+# Entries carry either inline content or the path of a file already on the host,
+# such as a certificate issued by ansible-role-elastic-tls.
+- name: Certificates | Install certificates
+  ansible.builtin.copy:
+    content: "{{ item.certificate.content | default(omit) }}"
+    src: "{{ omit if item.certificate.content is defined else item.certificate.path }}"
+    remote_src: "{{ item.certificate.content is not defined }}"
+    dest: "{{ logstash_ssl_dir }}/{{ item.name }}.crt"
+    owner: root
+    group: logstash
+    mode: "0644"
+  loop: "{{ _ls_ssl_entries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _ls_tls_certs
+
+- name: Certificates | Install private keys
+  ansible.builtin.copy:
+    content: "{{ item.key.content | default(omit) }}"
+    src: "{{ omit if item.key.content is defined else item.key.path }}"
+    remote_src: "{{ item.key.content is not defined }}"
+    dest: "{{ logstash_ssl_dir }}/{{ item.name }}.key"
+    owner: root
+    group: logstash
+    mode: "0640"
+  loop: "{{ _ls_ssl_entries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _ls_tls_keys
+  no_log: "{{ logstash_no_log }}"
+  diff: false
+
+- name: Certificates | Install CA certificate
+  ansible.builtin.copy:
+    content: "{{ logstash_ssl_ca_certificate if (logstash_ssl_ca_certificate | length) > 0 else omit }}"
+    src: "{{ _ls_ssl_ca_path if (_ls_ssl_ca_path | length) > 0 else omit }}"
+    remote_src: "{{ (_ls_ssl_ca_path | length) > 0 }}"
+    dest: "{{ logstash_ssl_dir }}/ca.crt"
+    owner: root
+    group: logstash
+    mode: "0644"
+  register: _ls_tls_ca
+  when: (logstash_ssl_ca_certificate | length) > 0 or (_ls_ssl_ca_path | length) > 0
+
+- name: Certificates | Check for PKCS#8 copies of the keys
+  ansible.builtin.stat:
+    path: "{{ logstash_ssl_dir }}/{{ item.name }}.pkcs8.key"
+  loop: "{{ _ls_ssl_entries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _ls_tls_pkcs8_stat
+
+# The beats and several other inputs only accept unencrypted PKCS#8 keys.
+- name: Certificates | Convert private keys to PKCS#8
+  ansible.builtin.shell:
+    cmd: >-
+      umask 077 &&
+      openssl pkcs8 -topk8 -nocrypt -in "$LS_KEY_IN" -out "$LS_KEY_OUT" -passin env:LS_KEY_PASSPHRASE
+    executable: /bin/bash
+  environment:
+    LS_KEY_IN: "{{ logstash_ssl_dir }}/{{ item.0.name }}.key"
+    LS_KEY_OUT: "{{ logstash_ssl_dir }}/{{ item.0.name }}.pkcs8.key"
+    LS_KEY_PASSPHRASE: "{{ item.0.key.passphrase | default('') }}"
+  loop: "{{ _ls_ssl_entries | zip(_ls_tls_keys.results, _ls_tls_pkcs8_stat.results) | list }}"
+  when: item.1 is changed or not item.2.stat.exists
+  register: _ls_tls_pkcs8
+  no_log: "{{ logstash_no_log }}"
+
+- name: Certificates | Set PKCS#8 key permissions
+  ansible.builtin.file:
+    path: "{{ logstash_ssl_dir }}/{{ item.name }}.pkcs8.key"
+    owner: root
+    group: logstash
+    mode: "0640"
+  loop: "{{ _ls_ssl_entries }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Certificates | Verify private keys match certificates
+  ansible.builtin.shell:
+    cmd: |
+      set -o pipefail
+      cert_pub=$(openssl x509 -in "$LS_CERT" -noout -pubkey | openssl pkey -pubin -outform DER | sha256sum)
+      key_pub=$(openssl pkey -in "$LS_KEY" -pubout -outform DER | sha256sum)
+      [ "$cert_pub" = "$key_pub" ]
+    executable: /bin/bash
+  environment:
+    LS_CERT: "{{ logstash_ssl_dir }}/{{ item.name }}.crt"
+    LS_KEY: "{{ logstash_ssl_dir }}/{{ item.name }}.pkcs8.key"
+  loop: "{{ _ls_ssl_entries }}"
+  loop_control:
+    label: "{{ item.name }}"
+  changed_when: false
+  check_mode: false
+
+# Inputs load certificates when the pipeline starts, so replacing them needs a
+# restart (a pipeline reload is not triggered by certificate files).
+- name: Certificates | Flag restart for certificate changes
+  ansible.builtin.set_fact:
+    _ls_restart_required: true
+  when: >-
+    _ls_tls_certs is changed or _ls_tls_keys is changed or _ls_tls_ca is changed or _ls_tls_pkcs8 is changed

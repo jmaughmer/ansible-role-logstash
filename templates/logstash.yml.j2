@@ -1,0 +1,46 @@
+# {{ ansible_managed }}
+
+# ------------------------------------ Node ------------------------------------
+node.name: {{ logstash_node_name | to_json }}
+path.data: {{ logstash_path_data | to_json }}
+path.logs: {{ logstash_path_logs | to_json }}
+log.level: {{ logstash_log_level | to_json }}
+
+# ------------------------------------ API -------------------------------------
+api.enabled: {{ logstash_api_enabled | bool | to_json }}
+api.http.host: {{ logstash_api_http_host | to_json }}
+api.http.port: {{ logstash_api_http_port | to_json }}
+{% if _ls_api_auth | bool %}
+api.auth.type: basic
+api.auth.basic.username: {{ logstash_api_auth_basic_username | to_json }}
+api.auth.basic.password: "${LOGSTASH_API_PASSWORD}"
+{% endif %}
+
+# --------------------------------- Reloading ----------------------------------
+config.reload.automatic: {{ logstash_config_reload_automatic | bool | to_json }}
+config.reload.interval: {{ logstash_config_reload_interval | to_json }}
+
+# ------------------------- Pipeline defaults (tuning) -------------------------
+{% for key, setting in _ls_pipeline_setting_map | dictsort %}
+{% if logstash_pipeline_defaults[key] is defined %}
+{{ setting }}: {{ logstash_pipeline_defaults[key] | to_json }}
+{% endif %}
+{% endfor %}
+{% if logstash_pipeline_buffer_type | length > 0 %}
+pipeline.buffer.type: {{ logstash_pipeline_buffer_type | to_json }}
+{% endif %}
+
+# ------------------------------- Queue defaults -------------------------------
+{% for key, value in logstash_queue | dictsort %}
+{{ _ls_queue_setting_map[key] }}: {{ value | to_json }}
+{% endfor %}
+
+# ------------------------ Dead letter queue defaults --------------------------
+{% for key, value in logstash_dead_letter_queue | dictsort %}
+{{ _ls_dlq_setting_map[key] }}: {{ value | to_json }}
+{% endfor %}
+{% if logstash_settings_extra | length > 0 %}
+
+# ------------------------------- Extra settings -------------------------------
+{{ logstash_settings_extra | to_nice_yaml(indent=2) }}
+{% endif %}

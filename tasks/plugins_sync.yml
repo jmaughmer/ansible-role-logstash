@@ -1,0 +1,118 @@
+---
+# Reconciles plugins on one host.
+# Inputs:
+#   _ls_plugin_host           host to act on (tasks are delegated to it)
+#   _ls_plugin_after_upgrade  also update unpinned plugins to match the new Logstash
+# Output:
+#   _ls_plugins_changed
+
+- name: "Plugins | List installed plugins on {{ _ls_plugin_host }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ logstash_home }}/bin/logstash-plugin"
+      - list
+      - --verbose
+  delegate_to: "{{ _ls_plugin_host }}"
+  register: _ls_plugin_list
+  changed_when: false
+  check_mode: false
+
+# Plugin items are either a name string or a dict (name, version, source, state).
+- name: "Plugins | Work out plugin changes for {{ _ls_plugin_host }}"
+  vars:
+    _ls_plugin_list_lines: "{{ _ls_plugin_list.stdout_lines | map('trim') | select('match', '^logstash-[A-Za-z0-9_-]+ [(][^)]+[)]$') | list }}"
+    _ls_plugin_raw: "{{ hostvars[_ls_plugin_host]._ls_plugins_raw }}"
+    _ls_plugin_absent_items: >-
+      {{ _ls_plugin_raw | select('mapping') | selectattr('state', 'defined')
+         | selectattr('state', 'equalto', 'absent') | list }}
+  ansible.builtin.set_fact:
+    _ls_plugin_lines: "{{ _ls_plugin_list_lines }}"
+    _ls_plugin_installed: "{{ _ls_plugin_list_lines | map('regex_replace', ' [(].*$', '') | list }}"
+    _ls_plugin_absent: "{{ _ls_plugin_absent_items | map(attribute='name') | list }}"
+    # present dict items; plain string items are always present
+    _ls_plugin_present_dicts: >-
+      {{ _ls_plugin_raw | select('mapping') | rejectattr('name', 'in', _ls_plugin_absent_items | map(attribute='name') | list) | list }}
+
+- name: "Plugins | Select plugins to remove on {{ _ls_plugin_host }}"
+  vars:
+    # "name (version)" for every pinned plugin, in the same format as `list --verbose`
+    _ls_plugin_pinned_lines: >-
+      {{ _ls_plugin_present_dicts | selectattr('version', 'defined') | map(attribute='name') | list
+         | zip(_ls_plugin_present_dicts | selectattr('version', 'defined') | map(attribute='version') | map('string') | list)
+         | map('join', ' (') | map('regex_replace', '$', ')') | list }}
+  ansible.builtin.set_fact:
+    # explicitly absent, or installed at a different version than pinned
+    _ls_plugin_remove: >-
+      {{ ((_ls_plugin_absent | intersect(_ls_plugin_installed))
+          + (_ls_plugin_pinned_lines | difference(_ls_plugin_lines)
+             | map('regex_replace', ' [(].*$', '') | list | intersect(_ls_plugin_installed))) | unique }}
+
+- name: "Plugins | Remove plugins on {{ _ls_plugin_host }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ logstash_home }}/bin/logstash-plugin"
+      - remove
+      - "{{ item }}"
+  loop: "{{ _ls_plugin_remove }}"
+  delegate_to: "{{ _ls_plugin_host }}"
+  register: _ls_plugin_removed
+
+# Runs as an async job (downloads survive a dropped SSH session) and is retried.
+# The wrapper skips plugins that are already present, so a retry after an
+# attempt that did finish is harmless. Any successful run counts as a change
+# because the plugin was missing when the task started.
+- name: "Plugins | Install plugins on {{ _ls_plugin_host }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/bin/bash', '-c', _ls_plugin_install_script, 'logstash-plugin-install',
+          logstash_home ~ '/bin/logstash-plugin', item.name if item is mapping else item]
+         + ((['--version', item.version | string] if item.version is defined and item.source is not defined else [])
+            if item is mapping else [])
+         + [(item.source | default(item.name)) if item is mapping else item] }}
+  vars:
+    _ls_plugin_install_script: |
+      set -o pipefail
+      plugin_cli=$1 name=$2; shift 2
+      if "$plugin_cli" list "$name" 2>/dev/null | grep -qx -- "$name"; then
+        echo "$name is already installed"
+        exit 0
+      fi
+      exec "$plugin_cli" install "$@"
+  loop: "{{ (hostvars[_ls_plugin_host]._ls_plugins_raw | select('string') | list) + _ls_plugin_present_dicts }}"
+  loop_control:
+    label: "{{ item.name if item is mapping else item }}"
+  when: (item.name if item is mapping else item) not in (_ls_plugin_installed | difference(_ls_plugin_remove))
+  environment: "{{ logstash_plugin_install_env }}"
+  delegate_to: "{{ _ls_plugin_host }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_plugin_added
+  until: _ls_plugin_added is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  changed_when: true
+
+- name: "Plugins | Update unpinned plugins after upgrade on {{ _ls_plugin_host }}"
+  ansible.builtin.command:
+    argv: "{{ [logstash_home ~ '/bin/logstash-plugin', 'update'] + _ls_plugin_unpinned }}"
+  vars:
+    _ls_plugin_unpinned: >-
+      {{ ((hostvars[_ls_plugin_host]._ls_plugins_raw | select('string') | list)
+          + (_ls_plugin_present_dicts | rejectattr('version', 'defined') | rejectattr('source', 'defined')
+             | map(attribute='name') | list)) | select('in', _ls_plugin_installed) | list }}
+  environment: "{{ logstash_plugin_install_env }}"
+  delegate_to: "{{ _ls_plugin_host }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_plugin_updated
+  until: _ls_plugin_updated is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  changed_when: "'Updated' in (_ls_plugin_updated.stdout | default(''))"
+  when:
+    - _ls_plugin_after_upgrade | bool
+    - _ls_plugin_unpinned | length > 0
+
+- name: "Plugins | Record plugin changes for {{ _ls_plugin_host }}"
+  ansible.builtin.set_fact:
+    _ls_plugins_changed: "{{ _ls_plugin_removed is changed or _ls_plugin_added is changed or _ls_plugin_updated is changed }}"

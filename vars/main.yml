@@ -1,0 +1,126 @@
+---
+# Internal variables, evaluated lazily (secrets never become facts).
+
+_ls_major_version: "{{ logstash_version.split('.')[0] }}"
+_ls_repo_name: "logstash-{{ _ls_major_version }}.x"
+# Repositories enabled for the role's own dnf tasks (none when repo_source is 'none')
+_ls_package_repos: >-
+  {{ [_ls_repo_name] if logstash_repo_source == 'elastic'
+     else ([logstash_satellite_repo_id] if logstash_repo_source == 'satellite' else []) }}
+_ls_python: "{{ ansible_facts['python']['executable'] | default('/usr/bin/python3') }}"
+_ls_keystore_path: "{{ logstash_conf_dir }}/logstash.keystore"
+_ls_keystore_state_file: "{{ logstash_conf_dir }}/.ansible-keystore-state.json"
+_ls_validate_script: /usr/local/libexec/ansible-logstash-validate-pipeline
+
+# Friendly pipeline keys -> Logstash setting names
+_ls_pipeline_setting_map:
+  workers: pipeline.workers
+  batch_size: pipeline.batch.size
+  batch_delay: pipeline.batch.delay
+  ordered: pipeline.ordered
+  ecs_compatibility: pipeline.ecs_compatibility
+
+_ls_queue_setting_map:
+  type: queue.type
+  max_bytes: queue.max_bytes
+  max_events: queue.max_events
+  page_capacity: queue.page_capacity
+  checkpoint_acks: queue.checkpoint.acks
+  checkpoint_writes: queue.checkpoint.writes
+  checkpoint_retry: queue.checkpoint.retry
+  drain: queue.drain
+  path: path.queue
+
+_ls_dlq_setting_map:
+  enable: dead_letter_queue.enable
+  max_bytes: dead_letter_queue.max_bytes
+  storage_policy: dead_letter_queue.storage_policy
+  flush_interval: dead_letter_queue.flush_interval
+  retain_age: dead_letter_queue.retain.age
+  path: path.dead_letter_queue
+
+_ls_pipeline_item_keys: >-
+  {{ ['id', 'state', 'config', 'templates', 'path_config', 'queue', 'dead_letter_queue', 'settings']
+     + (_ls_pipeline_setting_map.keys() | list) }}
+
+# `state` is optional, so test for it before comparing (missing attributes are
+# strictly undefined in equalto).
+_ls_pipelines_absent: >-
+  {{ logstash_pipelines | selectattr('state', 'defined') | selectattr('state', 'equalto', 'absent') | list }}
+_ls_pipelines_present: >-
+  {{ logstash_pipelines | rejectattr('id', 'in', _ls_pipelines_absent | map(attribute='id') | list) | list }}
+_ls_pipeline_ids: "{{ _ls_pipelines_present | map(attribute='id') | list }}"
+
+# Base directories for persisted queues / dead letter queues (Logstash appends
+# the pipeline id).
+_ls_queue_base_dirs: >-
+  {{ ([logstash_queue.path | default(logstash_path_data ~ '/queue')]
+      + (_ls_pipelines_present | selectattr('queue', 'defined') | map(attribute='queue')
+         | selectattr('path', 'defined') | map(attribute='path') | list)) | unique }}
+_ls_dlq_base_dirs: >-
+  {{ ([logstash_dead_letter_queue.path | default(logstash_path_data ~ '/dead_letter_queue')]
+      + (_ls_pipelines_present | selectattr('dead_letter_queue', 'defined') | map(attribute='dead_letter_queue')
+         | selectattr('path', 'defined') | map(attribute='path') | list)) | unique }}
+
+# ---------------------------------------------------------------------------
+# Hardened hosts
+# ---------------------------------------------------------------------------
+_ls_selinux_manage: >-
+  {{ (logstash_selinux_manage | string | lower) in ['true', 'yes']
+     or ((logstash_selinux_manage | string | lower) == 'auto'
+         and (ansible_facts['selinux']['status'] | default('disabled')) == 'enabled') }}
+# Only paths that were moved away from their packaged locations need a rule.
+_ls_selinux_fcontexts: >-
+  {%- set ns = namespace(map={}) -%}
+  {%- if logstash_path_data != '/var/lib/logstash' -%}
+  {%-   set ns.map = ns.map | combine({logstash_path_data: logstash_selinux_data_type}) -%}
+  {%- endif -%}
+  {%- if logstash_path_logs != '/var/log/logstash' -%}
+  {%-   set ns.map = ns.map | combine({logstash_path_logs: logstash_selinux_log_type}) -%}
+  {%- endif -%}
+  {%- for dir in (_ls_queue_base_dirs + _ls_dlq_base_dirs) | unique -%}
+  {%-   if not dir.startswith(logstash_path_data) -%}
+  {%-     set ns.map = ns.map | combine({dir: logstash_selinux_data_type}) -%}
+  {%-   endif -%}
+  {%- endfor -%}
+  {{ ns.map | combine(logstash_selinux_fcontexts) }}
+
+_ls_fapolicyd_paths: >-
+  {{ logstash_fapolicyd_trust_paths if (logstash_fapolicyd_trust_paths | length) > 0
+     else (([_ls_validate_script] if logstash_pipeline_validate | bool else [])
+           + ([logstash_home ~ '/vendor/bundle'] if (logstash_plugins | length) > 0 else [])) }}
+_ls_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ logstash_fapolicyd_trust_file }}"
+_ls_fapolicyd_manage: >-
+  {{ (logstash_fapolicyd_trust | string | lower) in ['true', 'yes']
+     or ((logstash_fapolicyd_trust | string | lower) == 'auto'
+         and (_ls_fapolicyd_state.stdout | default('') | trim) == 'active') }}
+
+_ls_api_client_host: >-
+  {{ '127.0.0.1' if logstash_api_http_host in ['0.0.0.0', '127.0.0.1', 'localhost', '::', '::1']
+     else logstash_api_http_host }}
+_ls_api_auth: "{{ (logstash_api_auth_basic_username | length) > 0 }}"
+
+_ls_keystore_env: >-
+  {{ {'LOGSTASH_KEYSTORE_PASS': logstash_keystore_password}
+     if (logstash_keystore_password | length) > 0 else {} }}
+
+_ls_keystore_desired: >-
+  {{ logstash_keystore_entries
+     | combine({'LOGSTASH_API_PASSWORD': logstash_api_auth_basic_password} if _ls_api_auth | bool else {}) }}
+
+# Manually supplied certificates first, then any issued by ansible-role-elastic-tls into
+# elastic_tls_ssl_certificates, so a manual entry always wins when both use one name.
+_ls_ssl_certificates: "{{ (ssl_certificates | default([])) + (elastic_tls_ssl_certificates | default([])) }}"
+_ls_ssl_entries: >-
+  {%- set ns = namespace(entries=[]) -%}
+  {%- for name in logstash_ssl_certificate_names -%}
+  {%-   set match = _ls_ssl_certificates | selectattr('name', 'equalto', name) | first | default({}) -%}
+  {%-   if match | length > 0 -%}{%- set ns.entries = ns.entries + [match] -%}{%- endif -%}
+  {%- endfor -%}
+  {{ ns.entries }}
+# Path to a CA file already on the host, used when no inline content is given.
+_ls_ssl_ca_path: >-
+  {{ '' if (logstash_ssl_ca_certificate | length) > 0
+     else ((_ls_ssl_entries | selectattr('ca', 'defined') | map(attribute='ca')
+            | selectattr('path', 'defined') | map(attribute='path') | first | default(''))
+           or logstash_ssl_ca_certificate_path) }}

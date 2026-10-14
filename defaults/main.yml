@@ -1,0 +1,297 @@
+---
+# =============================================================================
+# Platform
+# =============================================================================
+# Distributions accepted by preflight, as reported by ansible_facts['distribution'].
+# Major versions 9 and 10 are supported. Other Enterprise Linux rebuilds, such as
+# CentOS (Stream) or OracleLinux, can be added here but are not tested.
+logstash_supported_distributions:
+  - RedHat
+  - AlmaLinux
+  - Rocky
+
+# =============================================================================
+# Package / repository
+# =============================================================================
+# Exact 9.x release. Changing it on running hosts upgrades them in rolling batches.
+logstash_version: "9.5.4"
+
+# Where the logstash package comes from:
+#   elastic   - Elastic's public repository, or a mirror of it. The role writes a
+#               disabled repository file and enables it only for its own dnf tasks.
+#   satellite - a repository synced into Red Hat Satellite or Katello and delivered
+#               through subscription-manager (redhat.repo). Hosts must be registered
+#               and the repository must be in their content view.
+#   none      - repositories are managed outside this role; packages come from
+#               whatever repositories are enabled on the host.
+logstash_repo_source: elastic
+
+# --- logstash_repo_source: elastic ---
+logstash_repo_baseurl: "https://artifacts.elastic.co/packages/{{ _ls_major_version }}.x/yum"
+logstash_repo_gpgkey: "https://artifacts.elastic.co/GPG-KEY-elasticsearch"
+logstash_repo_gpgcheck: true
+
+# --- logstash_repo_source: satellite ---
+# Repository id as listed by `subscription-manager repos --list`, normally
+# <organization label>_<product label>_<repository label>, e.g. ACME_Elastic_Elastic_9_x
+logstash_satellite_repo_id: ""
+# unmanaged - leave the enabled state to Satellite (activation key, content overrides)
+# enabled   - enable it with subscription-manager
+# disabled  - disable it so routine `dnf update` never upgrades Logstash; the role
+#             still installs from it by enabling it for its own dnf tasks
+logstash_satellite_repo_state: unmanaged
+# Content overrides applied with `subscription-manager repo-override`, as strings.
+# Useful for slow links, since redhat.repo cannot be edited directly:
+#   { timeout: "600", retries: "20", minrate: "100" }
+logstash_satellite_repo_overrides: {}
+# Run `subscription-manager refresh` once when the repository is not yet defined on the host.
+logstash_satellite_refresh: true
+# Optional GPG key to import: a URL (e.g. the product's content credential on Satellite) or
+# a path on the host. Empty relies on the repository's own gpgkey setting, which dnf imports.
+logstash_satellite_gpgkey: ""
+
+# Before installing or upgrading, check that logstash_version is available from the
+# package source. Catches Satellite content views that were not published or promoted.
+logstash_package_version_check: true
+
+# =============================================================================
+# Paths
+# =============================================================================
+logstash_home: /usr/share/logstash
+logstash_conf_dir: /etc/logstash
+# Role-owned directory holding one <pipeline id>.conf per managed pipeline.
+logstash_pipeline_dir: /etc/logstash/pipelines.d
+logstash_path_data: /var/lib/logstash
+logstash_path_logs: /var/log/logstash
+
+# =============================================================================
+# JVM (set per host in host_vars)
+# =============================================================================
+# Xms and Xmx are both set to this value. 4g-8g is typical; keep it well below
+# physical memory so the OS page cache can serve persisted queue pages.
+logstash_heap_size: "1g"
+# Extra lines appended to jvm.options, e.g. ["-XX:MaxDirectMemorySize=2g"]
+logstash_jvm_options: []
+
+# =============================================================================
+# Node settings (logstash.yml)
+# =============================================================================
+logstash_node_name: "{{ inventory_hostname }}"
+logstash_log_level: info
+
+logstash_api_enabled: true
+logstash_api_http_host: 127.0.0.1
+logstash_api_http_port: 9600
+# Enables API basic auth when set. The password is stored in the keystore as
+# LOGSTASH_API_PASSWORD and referenced from logstash.yml.
+logstash_api_auth_basic_username: ""
+logstash_api_auth_basic_password: ""
+
+# Hot-reload pipelines.yml and pipeline files when they change.
+logstash_config_reload_automatic: true
+logstash_config_reload_interval: 3s
+
+# How changed pipelines are applied to running hosts:
+#   reload  - Logstash reloads only the changed pipelines on every host at once
+#             (automatic reload, or SIGHUP when automatic reload is disabled)
+#   restart - rolling restart in batches (requires logstash_config_reload_automatic: false)
+logstash_pipeline_change_action: reload
+
+# =============================================================================
+# Performance tuning - defaults for every pipeline (logstash.yml)
+# Individual pipelines override these in logstash_pipelines.
+# =============================================================================
+logstash_pipeline_defaults:
+  # workers: 8               # default: number of CPU cores
+  batch_size: 125            # events per worker batch; raise (e.g. 250-1000) for bulk outputs
+  batch_delay: 50            # ms to wait for a batch to fill
+  ordered: auto
+  ecs_compatibility: v8
+
+# heap | direct (Logstash 8.15+). Leave empty to use the Logstash default.
+logstash_pipeline_buffer_type: ""
+
+# Queue defaults (logstash.yml). Keys: type, max_bytes, max_events,
+# page_capacity, checkpoint_acks, checkpoint_writes, checkpoint_retry, drain, path
+logstash_queue:
+  type: memory
+  path: "{{ logstash_path_data }}/queue"
+  # max_bytes: 1024mb
+  # page_capacity: 64mb
+  # checkpoint_writes: 1024
+  # drain: false
+
+# Dead letter queue defaults. Keys: enable, max_bytes, storage_policy,
+# flush_interval, retain_age, path
+logstash_dead_letter_queue:
+  enable: false
+  path: "{{ logstash_path_data }}/dead_letter_queue"
+
+# Fail before changing anything if the filesystems holding persisted queues
+# cannot fit every queue's max_bytes.
+logstash_queue_disk_check: true
+
+# Any other logstash.yml settings (do not repeat keys rendered by the role)
+logstash_settings_extra: {}
+
+# =============================================================================
+# Pipelines
+# =============================================================================
+# - id: beats                          # required, [A-Za-z0-9_.-]
+#   state: present                     # absent removes the pipeline
+#   workers: 4                         # pipeline.workers
+#   batch_size: 500                    # pipeline.batch.size
+#   batch_delay: 50                    # pipeline.batch.delay
+#   ordered: auto                      # pipeline.ordered
+#   ecs_compatibility: v8              # pipeline.ecs_compatibility
+#   queue:                             # same keys as logstash_queue
+#     type: persisted
+#     max_bytes: 8gb
+#     page_capacity: 64mb
+#     checkpoint_writes: 1024
+#     drain: true
+#     path: /data/logstash/queue
+#   dead_letter_queue:                 # same keys as logstash_dead_letter_queue
+#     enable: true
+#     max_bytes: 1gb
+#   settings: {}                       # any other pipelines.yml keys
+#   # Pipeline definition - config and/or templates are concatenated into one file:
+#   config: |
+#     input { beats { port => 5044 } }
+#   templates:
+#     - logstash/beats-filter.conf.j2  # searched in role and playbook templates/
+#   # ...or reference files managed elsewhere instead:
+#   # path_config: "/opt/pipelines/beats/*.conf"
+logstash_pipelines: []
+
+# Remove *.conf files in logstash_pipeline_dir that are not listed above.
+logstash_pipelines_purge: true
+
+# Validate each changed pipeline with `logstash --config.test_and_exit` before
+# it is written. Costs one short JVM start per changed pipeline.
+logstash_pipeline_validate: true
+logstash_pipeline_validate_heap: 1g
+
+# =============================================================================
+# Keystore
+# =============================================================================
+# Optional keystore password (vault). Stored in /etc/sysconfig/logstash as
+# LOGSTASH_KEYSTORE_PASS. Set it before the keystore is first created.
+logstash_keystore_password: ""
+# Secrets referenced from pipelines as ${NAME}: { ES_LOGSTASH_PASSWORD: "..." }
+logstash_keystore_entries: {}
+# Remove keystore entries that are not listed above.
+logstash_keystore_purge: false
+
+# =============================================================================
+# TLS - uses the `ssl_certificates` host variable (format in README.md)
+# =============================================================================
+# Entries of ssl_certificates to install into logstash_ssl_dir as
+# <name>.crt, <name>.key and <name>.pkcs8.key (PKCS#8, required by the beats input).
+logstash_ssl_certificate_names: []
+logstash_ssl_ca_certificate: ""       # written to <logstash_ssl_dir>/ca.crt
+# Path to a CA file already on the host, as an alternative to the content above
+# (for example one installed by ansible-role-elastic-tls).
+logstash_ssl_ca_certificate_path: ""
+logstash_ssl_dir: /etc/logstash/certs
+
+# =============================================================================
+# Plugins
+# =============================================================================
+# - logstash-filter-translate
+# - name: logstash-output-custom
+#   version: 1.2.3                     # optional pin
+#   source: file:///opt/packs/logstash-output-custom-1.2.3.zip   # optional
+# - name: logstash-input-unwanted
+#   state: absent
+logstash_plugins: []
+# Environment for logstash-plugin, e.g. { HTTPS_PROXY: "http://proxy:3128" }
+logstash_plugin_install_env: {}
+
+# =============================================================================
+# Operating system / systemd
+# =============================================================================
+logstash_systemd_limit_nofile: 65535
+# The package runs Logstash with Nice=19. Set 0 on dedicated Logstash hosts.
+logstash_systemd_nice: ""
+# Package default is infinity. With queue.drain enabled a stop can take long.
+logstash_systemd_timeout_stop_sec: ""
+# Capabilities granted to the service. Logstash runs as the logstash user, which
+# cannot bind ports below 1024, so an input on 514/udp or 514/tcp needs:
+#   logstash_systemd_capabilities: ["CAP_NET_BIND_SERVICE"]
+logstash_systemd_capabilities: []
+# Extra environment for the service (and pipeline validation): { ES_HOSTS: "..." }
+logstash_environment: {}
+
+logstash_manage_firewall: true
+logstash_firewall_zone: public
+# Ports the configured inputs listen on. Logstash has no fixed port, so this is
+# the list to add to when a pipeline gains an input, in firewalld's own form:
+#   logstash_firewall_ports: ["514/udp", "514/tcp", "5044/tcp", "5000-5010/tcp"]
+# The API port is not here on purpose: it binds to localhost.
+logstash_firewall_ports: []
+# Named firewalld services, e.g. ["syslog", "syslog-tls"]
+logstash_firewall_services: []
+
+# =============================================================================
+# Restarts
+# =============================================================================
+logstash_restart_on_change: true
+logstash_force_restart: false
+# Maximum number of hosts restarted at the same time.
+logstash_restart_batch_size: 1
+# Pause between batches so clients (e.g. Beats load balancing) can rebalance.
+logstash_restart_pause_seconds: 0
+logstash_api_retries: 60
+logstash_api_delay: 5
+# Per-request HTTP timeout (seconds) for Logstash API calls
+logstash_api_timeout: 30
+# Stopping waits for in-flight batches (and queue drain when enabled).
+logstash_stop_retries: 180
+logstash_stop_delay: 5
+
+# =============================================================================
+# Hardened hosts (SELinux, fapolicyd)
+# =============================================================================
+# SELinux: label data, log and queue directories that have been moved out of
+# their default locations, which otherwise end up as default_t.
+#   auto  - manage them when SELinux is enabled on the host
+#   true / false
+logstash_selinux_manage: auto
+logstash_selinux_data_type: var_lib_t
+logstash_selinux_log_type: var_log_t
+# Extra or overriding contexts: { "/srv/logstash-queue": "var_lib_t" }
+logstash_selinux_fcontexts: {}
+
+# fapolicyd: trust what Logstash runs but rpm did not install, which means
+# plugins installed with logstash-plugin and the pipeline validation helper.
+#   auto  - manage the trust entries when fapolicyd is running
+#   true / false
+logstash_fapolicyd_trust: auto
+# Empty trusts the validation helper and, when plugins are managed, the plugin
+# directory. That directory holds thousands of files, so refreshing the entries
+# after a plugin change takes a while; a fapolicyd rule for the directory is the
+# lighter alternative.
+logstash_fapolicyd_trust_paths: []
+# File under /etc/fapolicyd/trust.d/ the entries are written to
+logstash_fapolicyd_trust_file: ansible-logstash
+# Rewrite the entries even when nothing changed
+logstash_fapolicyd_force_trust: false
+
+# =============================================================================
+# Network resilience (high-latency / low-bandwidth links)
+# See README.md (Slow and unreliable networks) and examples/inventory/group_vars/all/network.yml
+# =============================================================================
+# Retries for tasks that download (GPG key, packages, plugins).
+logstash_task_retries: 3
+logstash_task_delay: 15
+# Package and plugin downloads run as async jobs so they keep running on the
+# host if the SSH session drops: maximum run time and poll interval (seconds).
+logstash_download_async_timeout: 3600
+logstash_download_async_poll: 15
+# dnf repository per-request timeout (seconds) and download retries
+logstash_repo_timeout: 120
+logstash_repo_retries: 10
+logstash_dnf_lock_timeout: 300
+
+logstash_no_log: true

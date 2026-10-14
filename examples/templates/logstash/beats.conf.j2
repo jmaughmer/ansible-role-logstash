@@ -1,0 +1,20 @@
+input {
+  beats {
+    port => 5044
+    ssl_enabled => true
+    ssl_certificate => "{{ logstash_ssl_dir }}/{{ inventory_hostname }}.crt"
+    # the beats input requires a PKCS#8 key; the role creates <name>.pkcs8.key
+    ssl_key => "{{ logstash_ssl_dir }}/{{ inventory_hostname }}.pkcs8.key"
+    ssl_client_authentication => "none"
+  }
+}
+
+filter {
+  if [event][original] and ![message] {
+    mutate { copy => { "[event][original]" => "message" } }
+  }
+}
+
+output {
+  pipeline { send_to => ["es-output"] }
+}

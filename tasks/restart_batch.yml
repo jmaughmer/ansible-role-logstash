@@ -1,0 +1,103 @@
+---
+# Restarts (and, if pending, upgrades) the hosts in _ls_batch.
+- name: "Rolling restart | Batch {{ _ls_batch_index + 1 }}/{{ _ls_roll_batches | length }}: {{ _ls_batch | join(', ') }}"
+  vars:
+    _ls_batch_upgrades: >-
+      {{ _ls_batch | map('extract', hostvars) | selectattr('_ls_upgrade_pending')
+         | map(attribute='inventory_hostname') | list }}
+  block:
+    # A graceful stop finishes in-flight batches; with persisted queues
+    # unprocessed events stay on disk (or drain first when queue.drain is set).
+    - name: Rolling restart | Stop Logstash
+      ansible.builtin.systemd_service:
+        name: logstash
+        state: stopped
+        no_block: true
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch }}"
+
+    - name: Rolling restart | Wait for Logstash to stop
+      ansible.builtin.command:
+        cmd: systemctl is-active logstash
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch }}"
+      register: _ls_roll_stopped
+      until: (_ls_roll_stopped.stdout | trim) in ['inactive', 'failed', 'unknown']
+      retries: "{{ logstash_stop_retries }}"
+      delay: "{{ logstash_stop_delay }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Rolling restart | Upgrade Logstash package
+      ansible.builtin.dnf:
+        name: "logstash-{{ hostvars[item]._ls_target_version }}"
+        state: present
+        allow_downgrade: false
+        lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+        enablerepo: "{{ _ls_package_repos if _ls_package_repos | length > 0 else omit }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch_upgrades }}"
+      async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+      poll: "{{ logstash_download_async_poll }}"
+      register: _ls_roll_upgrade
+      until: _ls_roll_upgrade is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+
+    - name: Rolling restart | Reconcile plugins on upgraded hosts
+      ansible.builtin.include_tasks: plugins_sync.yml
+      vars:
+        _ls_plugin_host: "{{ _ls_upgrade_host }}"
+        _ls_plugin_after_upgrade: true
+      loop: "{{ _ls_batch_upgrades if logstash_plugins | length > 0 else [] }}"
+      loop_control:
+        loop_var: _ls_upgrade_host
+
+    # Reconciling and updating plugins rewrites files under vendor/bundle, so
+    # fapolicyd would refuse them once Logstash starts.
+    - name: Rolling restart | Refresh fapolicyd trust on upgraded hosts
+      ansible.builtin.include_tasks:
+        file: fapolicyd_refresh.yml
+        apply:
+          tags: [logstash, logstash_service]
+      vars:
+        _ls_fapolicyd_host: "{{ _ls_trust_host }}"
+      loop: >-
+        {{ (_ls_batch_upgrades if logstash_plugins | length > 0 else [])
+           | select('in', ansible_play_hosts | map('extract', hostvars)
+               | selectattr('_ls_fapolicyd_trust', 'defined') | selectattr('_ls_fapolicyd_trust')
+               | map(attribute='inventory_hostname') | list) | list }}
+      loop_control:
+        loop_var: _ls_trust_host
+
+    - name: Rolling restart | Start Logstash
+      ansible.builtin.systemd_service:
+        name: logstash
+        state: started
+        daemon_reload: "{{ (_ls_batch_upgrades | length) > 0 }}"
+        no_block: true
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch }}"
+
+    - name: Rolling restart | Wait for pipelines on restarted hosts
+      ansible.builtin.include_tasks: wait_pipelines.yml
+      vars:
+        _ls_wait_reloaded_ids: []
+      loop: "{{ _ls_batch }}"
+      loop_control:
+        loop_var: _ls_wait_host
+
+    - name: Rolling restart | Pause before next batch
+      ansible.builtin.pause:
+        seconds: "{{ logstash_restart_pause_seconds }}"
+      when:
+        - logstash_restart_pause_seconds | int > 0
+        - (_ls_batch_index + 1) < (_ls_roll_batches | length)
+
+  rescue:
+    - name: Rolling restart | Stop after failed batch
+      ansible.builtin.fail:
+        msg: >-
+          Rolling restart failed for batch [{{ _ls_batch | join(', ') }}] at task
+          '{{ ansible_failed_task.name | default('unknown') }}'. No further hosts were restarted.
+          Check `journalctl -u logstash` and {{ logstash_path_logs }}/logstash-plain.log on those hosts.

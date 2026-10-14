@@ -1,0 +1,80 @@
+---
+# Phase 1 - every host in parallel. Nothing here restarts a running Logstash;
+# changes that need a restart set _ls_restart_required. Pipeline changes are
+# validated before they are written.
+- name: Gather Logstash state
+  ansible.builtin.import_tasks: facts.yml
+  tags: [logstash, always]
+
+- name: Preflight checks
+  ansible.builtin.import_tasks: preflight.yml
+  tags: [logstash, always]
+
+- name: Configure package repository
+  ansible.builtin.import_tasks: repository.yml
+  when: logstash_repo_source != 'none'
+  tags: [logstash, logstash_install]
+
+- name: Install Logstash
+  ansible.builtin.import_tasks: install.yml
+  tags: [logstash, logstash_install]
+
+- name: Tune operating system and service
+  ansible.builtin.import_tasks: system.yml
+  tags: [logstash, logstash_system]
+
+- name: Prepare queue directories and check disk capacity
+  ansible.builtin.import_tasks: queues.yml
+  tags: [logstash, logstash_queues, logstash_pipelines]
+
+- name: Manage SELinux file contexts
+  ansible.builtin.import_tasks: selinux.yml
+  when:
+    - _ls_selinux_manage | bool
+    - _ls_selinux_fcontexts | length > 0
+  tags: [logstash, logstash_system]
+
+- name: Install TLS certificates
+  ansible.builtin.import_tasks: certificates.yml
+  tags: [logstash, logstash_tls]
+
+- name: Manage keystore
+  ansible.builtin.import_tasks: keystore.yml
+  tags: [logstash, logstash_keystore]
+
+- name: Manage plugins
+  ansible.builtin.import_tasks: plugins.yml
+  tags: [logstash, logstash_plugins]
+
+- name: Install the pipeline validation helper
+  ansible.builtin.import_tasks: validate_helper.yml
+  tags: [logstash, logstash_pipelines]
+
+- name: Manage fapolicyd trust
+  ansible.builtin.import_tasks: fapolicyd.yml
+  when:
+    - (logstash_fapolicyd_trust | string | lower) != 'false'
+    - _ls_fapolicyd_paths | length > 0
+  tags: [logstash, logstash_plugins, logstash_pipelines]
+
+- name: Render settings
+  ansible.builtin.import_tasks: configure.yml
+  tags: [logstash, logstash_config]
+
+- name: Deploy pipelines
+  ansible.builtin.import_tasks: pipelines.yml
+  tags: [logstash, logstash_pipelines]
+
+# Phase 2 - start new/stopped hosts, apply pipeline reloads, then rolling
+# restart of running hosts that need it (orchestrated from the first host).
+- name: Start service and apply pipeline reloads
+  ansible.builtin.import_tasks: service.yml
+  tags: [logstash, logstash_service, logstash_pipelines]
+
+- name: Rolling restart
+  ansible.builtin.include_tasks:
+    file: rolling_restart.yml
+    apply:
+      tags: [logstash, logstash_service]
+  when: inventory_hostname == ansible_play_hosts | first
+  tags: [logstash, logstash_service]

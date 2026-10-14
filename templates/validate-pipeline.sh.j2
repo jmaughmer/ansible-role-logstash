@@ -1,0 +1,34 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Validates a single Logstash pipeline file with --config.test_and_exit, as the
+# logstash user, using a throwaway settings/data directory so the running
+# instance (and its automatic reload setting) is not involved.
+# Usage: {{ _ls_validate_script }} <pipeline file>
+set -euo pipefail
+
+config_file="$1"
+work_dir=$(mktemp -d "{{ logstash_path_data }}/.ansible-validate.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT
+
+mkdir "$work_dir/settings" "$work_dir/data" "$work_dir/logs" "$work_dir/tmp"
+cp "{{ logstash_conf_dir }}/jvm.options" "{{ logstash_conf_dir }}/log4j2.properties" "$work_dir/settings/"
+cp "$config_file" "$work_dir/pipeline.conf"
+cat > "$work_dir/settings/logstash.yml" <<'EOF'
+keystore.file: {{ _ls_keystore_path | to_json }}
+{% if logstash_pipeline_defaults.ecs_compatibility is defined %}
+pipeline.ecs_compatibility: {{ logstash_pipeline_defaults.ecs_compatibility | to_json }}
+{% endif %}
+EOF
+chown -R logstash:logstash "$work_dir"
+
+# Small heap so validation does not compete with the running instance
+export LS_JAVA_OPTS="-Xms{{ logstash_pipeline_validate_heap }} -Xmx{{ logstash_pipeline_validate_heap }} -Djava.io.tmpdir=$work_dir/tmp"
+
+runuser -u logstash -- "{{ logstash_home }}/bin/logstash" \
+  --path.settings "$work_dir/settings" \
+  --path.data "$work_dir/data" \
+  --path.logs "$work_dir/logs" \
+  --log.level error \
+  --config.test_and_exit \
+  --path.config "$work_dir/pipeline.conf"

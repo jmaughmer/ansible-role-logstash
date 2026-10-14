@@ -1,0 +1,25 @@
+---
+# Included on the first host of the play only. Hosts that need a restart are
+# processed in batches of logstash_restart_batch_size using delegation, so
+# never more than that many Logstash instances are down at once.
+
+- name: Rolling restart | Build restart plan
+  ansible.builtin.set_fact:
+    _ls_roll_batches: >-
+      {{ ansible_play_hosts | map('extract', hostvars)
+         | selectattr('_ls_needs_rolling', 'defined') | selectattr('_ls_needs_rolling')
+         | map(attribute='inventory_hostname') | list
+         | batch(logstash_restart_batch_size | int) | list }}
+
+- name: Rolling restart | Show plan
+  ansible.builtin.debug:
+    msg: "{{ _ls_roll_batches | map('join', ', ') | list }}"
+  when: _ls_roll_batches | length > 0
+
+- name: Rolling restart | Process batches
+  ansible.builtin.include_tasks: restart_batch.yml
+  loop: "{{ _ls_roll_batches }}"
+  loop_control:
+    loop_var: _ls_batch
+    index_var: _ls_batch_index
+    label: "{{ _ls_batch | join(', ') }}"

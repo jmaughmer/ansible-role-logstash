@@ -1,0 +1,6 @@
+---
+# EXAMPLE ONLY - replace the values and encrypt this file:
+#   ansible-vault encrypt inventory/group_vars/logstash/vault.yml
+vault_logstash_keystore_password: "CHANGE-ME-keystore-password"
+# Password of the logstash_internal user in Elasticsearch (role: logstash_writer)
+vault_logstash_es_password: "CHANGE-ME-logstash-internal-password"

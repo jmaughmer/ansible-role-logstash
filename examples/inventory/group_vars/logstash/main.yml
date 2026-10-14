@@ -1,0 +1,126 @@
+---
+logstash_version: "9.5.4"
+
+# ------------------------------------------------------------------ package source
+# Default: Elastic's public repository. To install from Red Hat Satellite / Katello:
+# logstash_repo_source: satellite
+# logstash_satellite_repo_id: ACME_Elastic_Elastic_9_x    # subscription-manager repos --list
+# logstash_satellite_repo_state: disabled                 # keep `dnf update` from upgrading Logstash
+
+# ------------------------------------------------------------------ service tuning
+logstash_systemd_nice: 0                 # package default is 19
+logstash_systemd_limit_nofile: 65535
+logstash_restart_batch_size: 1
+logstash_restart_pause_seconds: 30       # let Beats rebalance between hosts
+
+# ------------------------------------------------------------------ pipeline defaults
+logstash_pipeline_defaults:
+  batch_size: 250
+  batch_delay: 50
+  ordered: auto
+  ecs_compatibility: v8
+
+# Disk-backed queues by default; each pipeline gets <path>/<pipeline id>.
+# Point path at a dedicated filesystem (e.g. /data/logstash/queue) for heavy
+# ingest; preflight verifies the sum of max_bytes fits on it.
+logstash_queue:
+  type: persisted
+  path: "{{ logstash_path_data }}/queue"
+  max_bytes: 2gb
+  page_capacity: 64mb
+  checkpoint_writes: 1024
+  drain: false
+
+logstash_dead_letter_queue:
+  enable: false
+  path: "{{ logstash_path_data }}/dead_letter_queue"
+
+# ------------------------------------------------------------------ TLS / secrets
+# The certificate has to cover every name senders use: the host's own name for
+# beats, and the virtual address keepalived serves for syslog senders. With
+# ansible-role-elastic-tls that is the certificate's dns/ip list; with a
+# certificate from your own CA, ask for both names in the SANs.
+logstash_ssl_certificate_names: ["{{ inventory_hostname }}"]
+# CA that issued the Elasticsearch HTTP certificates (used by the es-output pipeline)
+logstash_ssl_ca_certificate: |
+  -----BEGIN CERTIFICATE-----
+  REPLACE-WITH-ISSUING-CA-CERTIFICATE
+  -----END CERTIFICATE-----
+
+logstash_keystore_password: "{{ vault_logstash_keystore_password }}"
+logstash_keystore_entries:
+  ES_LOGSTASH_PASSWORD: "{{ vault_logstash_es_password }}"
+
+logstash_firewall_ports:
+  - 5044/tcp          # beats
+  - 5514/tcp          # syslog over TLS
+  - 514/udp           # syslog from network gear
+  - 514/tcp
+# Binding 514 needs the capability; without it Logstash fails to start that input.
+logstash_systemd_capabilities: [CAP_NET_BIND_SERVICE]
+
+# ------------------------------------------------------------------ plugins
+logstash_plugins: []
+#  - logstash-filter-tld
+#  - name: logstash-output-custom
+#    source: file:///opt/logstash-packs/logstash-output-custom-1.0.0.zip
+
+# ------------------------------------------------------------------ pipelines
+# beats and syslog parse events and hand them to es-output through
+# pipeline-to-pipeline communication; es-output owns the connection to
+# Elasticsearch and buffers on disk while the cluster is unavailable.
+logstash_pipelines:
+  - id: beats
+    workers: 4
+    batch_size: 500
+    queue:
+      type: persisted
+      max_bytes: 8gb
+      drain: true
+    templates:
+      - logstash/beats.conf.j2
+
+  - id: syslog
+    workers: 2
+    queue:
+      type: persisted
+      max_bytes: 2gb
+    config: |
+      input {
+        # Senders that can do TLS
+        tcp {
+          port => 5514
+          ssl_enabled => true
+          ssl_certificate => "{{ logstash_ssl_dir }}/{{ inventory_hostname }}.crt"
+          ssl_key => "{{ logstash_ssl_dir }}/{{ inventory_hostname }}.pkcs8.key"
+        }
+        # Network gear, which sends plain syslog to the virtual address. The
+        # receive buffer matters more than anything else here: datagrams are
+        # dropped by the kernel long before Logstash is the bottleneck.
+        udp {
+          port => 514
+          receive_buffer_bytes => 16777216
+        }
+        tcp { port => 514 }
+      }
+      filter {
+        syslog_pri { }
+      }
+      output {
+        pipeline { send_to => ["es-output"] }
+      }
+
+  - id: es-output
+    workers: 8
+    batch_size: 1000
+    queue:
+      type: persisted
+      max_bytes: 16gb
+      page_capacity: 128mb
+      checkpoint_writes: 4096
+    dead_letter_queue:
+      enable: true
+      max_bytes: 2gb
+      storage_policy: drop_older
+    templates:
+      - logstash/elasticsearch-output.conf.j2

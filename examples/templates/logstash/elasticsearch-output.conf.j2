@@ -1,0 +1,14 @@
+input {
+  pipeline { address => "es-output" }
+}
+
+output {
+  elasticsearch {
+    hosts => [{% for host in groups['elasticsearch'] | default([]) %}"https://{{ host }}:9200"{{ ", " if not loop.last else "" }}{% endfor %}]
+    user => "logstash_internal"
+    password => "${ES_LOGSTASH_PASSWORD}"
+    ssl_enabled => true
+    ssl_certificate_authorities => ["{{ logstash_ssl_dir }}/ca.crt"]
+    data_stream => "true"
+  }
+}

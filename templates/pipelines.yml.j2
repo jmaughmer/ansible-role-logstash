@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+# Settings not listed for a pipeline fall back to logstash.yml.
+{% for p in _ls_pipelines_present %}
+
+- pipeline.id: {{ p.id | string | to_json }}
+  path.config: {{ (p.path_config | default(logstash_pipeline_dir ~ '/' ~ p.id ~ '.conf')) | to_json }}
+{% for key, setting in _ls_pipeline_setting_map | dictsort %}
+{% if p[key] is defined %}
+  {{ setting }}: {{ p[key] | to_json }}
+{% endif %}
+{% endfor %}
+{% for key, value in (p.queue | default({})) | dictsort %}
+  {{ _ls_queue_setting_map[key] }}: {{ value | to_json }}
+{% endfor %}
+{% for key, value in (p.dead_letter_queue | default({})) | dictsort %}
+  {{ _ls_dlq_setting_map[key] }}: {{ value | to_json }}
+{% endfor %}
+{% for key, value in (p.settings | default({})) | dictsort %}
+  {{ key }}: {{ value | to_json }}
+{% endfor %}
+{% endfor %}
