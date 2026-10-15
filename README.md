@@ -544,8 +544,8 @@ MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
 The containers download Logstash from Elastic's repository, so the tests need internet access. Each host runs a 512 MB heap, plus a second JVM while pipelines are validated.
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both,
-then every Podman scenario on both distros.
+[`.ansible-lint`](.ansible-lint)). There is no GitHub Actions workflow; run the lint and Molecule
+scenarios locally.
 
 Not covered by containers:
 
