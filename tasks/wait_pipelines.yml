@@ -5,9 +5,11 @@
 #   _ls_wait_host            host to check (API calls are delegated to it)
 #   _ls_wait_reloaded_ids    pipeline ids expected to reload (default: none)
 
+# A pipeline Logstash has stopped and removed stays listed by the API, but
+# with no event statistics, so only pipelines that report events count.
 - name: "Wait | Pipelines running on {{ _ls_wait_host }}"
   ansible.builtin.uri:
-    url: "{{ hostvars[_ls_wait_host]._ls_api_url }}/_node/pipelines"
+    url: "{{ hostvars[_ls_wait_host]._ls_api_url }}/_node/stats/pipelines"
     url_username: "{{ logstash_api_auth_basic_username if _ls_api_auth | bool else omit }}"
     url_password: "{{ logstash_api_auth_basic_password if _ls_api_auth | bool else omit }}"
     force_basic_auth: "{{ _ls_api_auth | bool }}"
@@ -17,7 +19,8 @@
   until:
     - (_ls_wait_pipelines.status | default(-1)) == 200
     - >-
-      (_ls_wait_pipelines.json.pipelines | default({})).keys() | list | reject('match', '^[.]') | sort
+      (_ls_wait_pipelines.json.pipelines | default({})) | dict2items | selectattr('value.events', 'mapping')
+      | map(attribute='key') | reject('match', '^[.]') | sort
       == hostvars[_ls_wait_host]._ls_expected_pipeline_ids | sort
   retries: "{{ logstash_api_retries }}"
   delay: "{{ logstash_api_delay }}"

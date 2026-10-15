@@ -1,0 +1,27 @@
+---
+# Sets test_state on this host: Logstash's main PID and, per running pipeline,
+# how many reloads have succeeded. Comparing two of these tells a reload (same
+# PID, counters moved) from a restart (new PID).
+- name: Read Logstash's main PID
+  ansible.builtin.systemd_service:
+    name: logstash
+  register: test_unit
+
+- name: Read the pipeline statistics
+  ansible.builtin.uri:
+    url: http://127.0.0.1:9600/_node/stats/pipelines
+    url_username: "{{ test_api_user }}"
+    url_password: "{{ test_api_password }}"
+    force_basic_auth: true
+  register: test_stats
+
+# A removed pipeline stays listed, without event statistics
+- name: Record the state
+  vars:
+    test_running: >-
+      {{ test_stats.json.pipelines | dict2items | selectattr('value.events', 'mapping')
+         | rejectattr('key', 'match', '^[.]') | items2dict }}
+  ansible.builtin.set_fact:
+    test_state:
+      pid: "{{ test_unit.status.MainPID | int }}"
+      reloads: "{{ dict(test_running.keys() | zip(test_running.values() | map(attribute='reloads.successes'))) }}"

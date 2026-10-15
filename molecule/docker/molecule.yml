@@ -1,0 +1,68 @@
+---
+# Same test as the default (Podman) scenario, on Docker: same hosts,
+# sequence, playbooks and inventory, all taken from ../default/.
+#   molecule test -s docker
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: docker
+
+platforms:
+  - name: ls-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false   # keep the image's own CMD: systemd as PID 1
+    privileged: true          # firewalld loads nftables rules
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    docker_networks:          # created once, shared by both instances
+      - name: logstash_molecule
+    networks:
+      - name: logstash_molecule
+    groups: [logstash, firewalld]
+
+  - name: ls-2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    networks:
+      - name: logstash_molecule
+    groups: [logstash]
+
+provisioner:
+  name: ansible
+  playbooks:
+    prepare: ../default/prepare.yml
+    converge: ../default/converge.yml
+    side_effect: ../default/side_effect.yml
+    verify: ../default/verify.yml
+  inventory:
+    links:
+      group_vars: ../default/inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - check
+    - verify
+    - destroy

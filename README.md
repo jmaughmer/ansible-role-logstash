@@ -487,6 +487,73 @@ the data directory — come out as `default_t`. With `logstash_selinux_manage: a
 
 [`defaults/main.yml`](defaults/main.yml) documents every variable.
 
+## Testing
+
+[`molecule/default/`](molecule/default/) runs the role against two systemd containers (`ls-1`, `ls-2`) on one
+container network, with two pipelines:
+
+- `ingest`: an `http` input on 8080. A filter adds a field from the keystore and one from `logstash_environment`. It uses a memory queue.
+- `beats`: a `beats` input on 5044 with TLS. It uses a persisted queue in a relocated directory, and a dead letter queue.
+
+Both pipelines write their events to a file. The certificate is self-signed in `prepare.yml` with an encrypted key, so the role has to use the passphrase to make the PKCS#8 copy. API basic auth and a keystore password are on. firewalld runs on `ls-1` only, so the role's firewall path runs there and the "not running" path on `ls-2`.
+
+The sequence is:
+
+1. **converge**, then **idempotence**: a second converge must change nothing.
+2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)) applies the role with other settings and checks how each change was applied:
+   - a changed pipeline reloads on its own: same PID, only its reload counter moves, and new events show the change;
+   - a pipeline added, then marked `state: absent`, starts and stops by reload, and its file is removed;
+   - an invalid pipeline is refused by validation: the run fails, the old file stays and keeps running;
+   - a JVM option change is applied by a rolling restart: new PIDs, and `ls-1` is running again before `ls-2` stops.
+3. **check**: converge in check mode on the installed hosts.
+4. **verify** ([`verify.yml`](molecule/default/verify.yml)):
+   - the requested version is installed and running, and the service is enabled;
+   - the API refuses requests without credentials;
+   - the pipelines run with their per-pipeline settings and queue types;
+   - the systemd drop-in took effect (`Nice`, `LimitNOFILE`, `TimeoutStopSec`);
+   - files and directories have their documented owners and modes;
+   - the queue directories are where they were asked for;
+   - the heap and the extra JVM option are in `jvm.options`, and the keystore holds the managed entries;
+   - the PKCS#8 key is unencrypted and matches the supplied key, and the `beats` input serves the installed certificate;
+   - on `ls-1`, the input ports are open now and permanently;
+   - each host sends an event to the other's address, and the event arrives carrying the keystore value and the environment value.
+
+Other scenarios:
+
+| Scenario | What it covers |
+|---|---|
+| `preflight` | Settings that preflight must refuse, each with its own message. Among them: an unsupported distribution, a version that isn't an exact 9.x.y, a bad package source or Satellite override, a heap size Logstash can't read, `restart` with automatic reload, misspelt queue and pipeline keys, a pipeline with both or neither of `config` and `path_config`, no pipelines or duplicate ids, a port below 1024 without `CAP_NET_BIND_SERVICE`. Failures that involve secrets (certificate entries, the keystore password, the API user) must be censored and never print the secret. Nothing is installed. |
+| `upgrade` | `prepare.yml` installs and starts an older 9.x release with the default scenario's settings, then converge applies the role's `logstash_version`. The hosts must be upgraded one at a time and run the new release, then the default verification runs. |
+| `docker` | The default scenario on Docker instead of Podman. |
+
+```bash
+pip install -r molecule/requirements.txt
+```
+
+```bash
+for s in default preflight upgrade; do molecule test -s "$s" || break; done
+```
+
+The scenarios use Podman (rootless works), except `docker`, which needs Docker. `MOLECULE_DISTRO` picks the image
+(default `rockylinux9`; also `rockylinux10`):
+
+```bash
+MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
+```
+
+The containers download Logstash from Elastic's repository, so the tests need internet access. Each host runs a 512 MB heap, plus a second JVM while pipelines are validated.
+
+Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
+[`.ansible-lint`](.ansible-lint)). [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both,
+then every Podman scenario on both distros.
+
+Not covered by containers:
+
+- SELinux file contexts and fapolicyd trust entries, which need virtual machines with SELinux enforcing and fapolicyd running;
+- FIPS mode;
+- Red Hat Satellite repositories;
+- plugin installs and updates, which download from rubygems.org.
+
 ## Role layout
 
 ```
@@ -511,7 +578,8 @@ the data directory — come out as `default_t`. With `logstash_selinux_manage: a
 │   ├── wait_pipelines.yml     # readiness and reload verification
 │   └── rolling_restart.yml / restart_batch.yml
 ├── templates/
-└── examples/
+├── examples/
+└── molecule/                  # tests, see Testing
 ```
 
 ## Related roles

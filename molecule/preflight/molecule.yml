@@ -1,0 +1,38 @@
+---
+# Preflight only: each case in converge.yml runs the role's facts and
+# preflight tasks with settings that must be refused, and checks the run
+# fails with the right message and without printing a secret. Nothing is
+# installed, so there is no idempotence or verify step.
+#   molecule test -s preflight
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: podman
+
+platforms:
+  - name: ls-p1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    groups: [logstash]
+
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      group_vars: inventory/group_vars/
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - converge
+    - destroy

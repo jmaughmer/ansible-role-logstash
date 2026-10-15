@@ -10,7 +10,7 @@
 # Used afterwards to confirm that changed pipelines actually reloaded.
 - name: Pipelines | Snapshot pipeline reload statistics
   ansible.builtin.uri:
-    url: "{{ _ls_api_url }}/_node/stats/pipelines?filter_path=pipelines.*.reloads"
+    url: "{{ _ls_api_url }}/_node/stats/pipelines"
     url_username: "{{ logstash_api_auth_basic_username if _ls_api_auth | bool else omit }}"
     url_password: "{{ logstash_api_auth_basic_password if _ls_api_auth | bool else omit }}"
     force_basic_auth: "{{ _ls_api_auth | bool }}"
@@ -76,9 +76,12 @@
   ansible.builtin.set_fact:
     _ls_pipelines_changed: >-
       {{ _ls_pipeline_files is changed or _ls_pipelines_yml is changed or _ls_pipeline_removed is changed }}
+    # Changed pipelines that were running; others start rather than reload. A
+    # pipeline Logstash removed stays listed, without event statistics.
     _ls_pipelines_reloaded_ids: >-
       {{ _ls_pipeline_files.results | default([]) | selectattr('changed') | map(attribute='_ls_pipeline.id')
-         | select('in', (_ls_reload_snapshot.json.pipelines | default({})).keys() | list) | list }}
+         | select('in', _ls_reload_snapshot.json.pipelines | default({}) | dict2items
+                        | selectattr('value.events', 'mapping') | map(attribute='key') | list) | list }}
 
 - name: Pipelines | Flag restart for pipeline changes
   ansible.builtin.set_fact:

@@ -1,0 +1,41 @@
+---
+# Included after a change that needs a restart, with test_start (registered
+# `date +%s` from before the role ran) and test_before (read_state.yml from
+# before the change). Checks every host restarted, one at a time in play
+# order: each host was running again before the next one stopped.
+- name: Read when Logstash last stopped and started
+  ansible.builtin.command:
+    argv: [systemctl, show, logstash, --timestamp=unix, --property=InactiveEnterTimestamp, --property=ActiveEnterTimestamp]
+  register: test_times
+  changed_when: false
+
+- name: Record the times
+  ansible.builtin.set_fact:
+    test_unit_times: "{{ dict(test_times.stdout_lines | map('regex_replace', '=@?', '=') | map('split', '=')) }}"
+
+- name: Read the state
+  ansible.builtin.include_tasks: read_state.yml
+
+- name: Check this host restarted after the role started
+  ansible.builtin.assert:
+    that:
+      - test_state.pid != test_before.pid
+      - test_unit_times.InactiveEnterTimestamp | int >= test_start.stdout | int
+    fail_msg: "PID {{ test_before.pid }} -> {{ test_state.pid }}; unit times {{ test_unit_times }}; role started at {{ test_start.stdout }}"
+
+- name: Check the hosts restarted one at a time
+  vars:
+    test_this: "{{ hostvars[ansible_play_hosts[item]].test_unit_times }}"
+    test_next: "{{ hostvars[ansible_play_hosts[item + 1]].test_unit_times }}"
+  ansible.builtin.assert:
+    that:
+      - test_this.ActiveEnterTimestamp | int <= test_next.InactiveEnterTimestamp | int
+    fail_msg: >-
+      {{ ansible_play_hosts[item + 1] }} stopped at {{ test_next.InactiveEnterTimestamp }},
+      before {{ ansible_play_hosts[item] }} was running again at {{ test_this.ActiveEnterTimestamp }}
+  loop: "{{ range(ansible_play_hosts | length - 1) | list }}"
+  run_once: true
+
+- name: Remember the state
+  ansible.builtin.set_fact:
+    test_before: "{{ test_state }}"

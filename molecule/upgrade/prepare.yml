@@ -1,0 +1,10 @@
+---
+- name: Prepare
+  ansible.builtin.import_playbook: ../default/prepare.yml
+
+# Any release below the role's default logstash_version will do; verify.yml
+# fails if converge had nothing to upgrade.
+- name: Install and start the previous release
+  ansible.builtin.import_playbook: ../default/converge.yml
+  vars:
+    logstash_version: 9.5.3

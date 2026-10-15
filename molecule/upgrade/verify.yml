@@ -1,0 +1,57 @@
+---
+# The upgrade was the only restart these hosts have had: prepare.yml started
+# them once, and converge stopped, upgraded and started each in turn.
+- name: Verify the rolling upgrade
+  hosts: logstash
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the role's defaults
+      ansible.builtin.include_vars:
+        file: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/defaults/main.yml"
+        name: test_defaults
+
+    - name: Read when Logstash last stopped and started
+      ansible.builtin.command:
+        argv: [systemctl, show, logstash, --timestamp=unix, --property=InactiveEnterTimestamp, --property=ActiveEnterTimestamp]
+      register: test_times
+      changed_when: false
+
+    - name: Record the times
+      ansible.builtin.set_fact:
+        test_unit_times: "{{ dict(test_times.stdout_lines | map('regex_replace', '=@?', '=') | map('split', '=')) }}"
+
+    - name: Read the running version
+      ansible.builtin.uri:
+        url: http://127.0.0.1:9600/
+        url_username: "{{ test_api_user }}"
+        url_password: "{{ test_api_password }}"
+        force_basic_auth: true
+      register: test_root
+
+    # Never stopped means converge had nothing to upgrade: the release in
+    # prepare.yml is not below the role's default.
+    - name: Check this host was stopped and runs the new release
+      ansible.builtin.assert:
+        that:
+          - test_root.json.version == test_defaults.logstash_version
+          - test_unit_times.InactiveEnterTimestamp | length > 0
+        fail_msg: >-
+          Role default {{ test_defaults.logstash_version }}, running {{ test_root.json.version }};
+          unit times {{ test_unit_times }}. Is the release in prepare.yml below the role default?
+
+    - name: Check the hosts were upgraded one at a time
+      vars:
+        test_this: "{{ hostvars[ansible_play_hosts[item]].test_unit_times }}"
+        test_next: "{{ hostvars[ansible_play_hosts[item + 1]].test_unit_times }}"
+      ansible.builtin.assert:
+        that:
+          - test_this.ActiveEnterTimestamp | int <= test_next.InactiveEnterTimestamp | int
+        fail_msg: >-
+          {{ ansible_play_hosts[item + 1] }} stopped at {{ test_next.InactiveEnterTimestamp }},
+          before {{ ansible_play_hosts[item] }} was running again at {{ test_this.ActiveEnterTimestamp }}
+      loop: "{{ range(ansible_play_hosts | length - 1) | list }}"
+      run_once: true
+
+- name: Run the default verification
+  ansible.builtin.import_playbook: ../default/verify.yml

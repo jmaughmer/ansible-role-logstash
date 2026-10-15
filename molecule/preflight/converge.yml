@@ -1,0 +1,229 @@
+---
+# Each case runs the role's facts and preflight tasks (nothing is installed)
+# with the role variables given next to it, and states the outcome:
+#   expect   regex the failure has to match; empty means it must pass
+# Every failure is also checked for the values in test_secrets, which must
+# never be printed. Checks that touch secrets run with no_log: depending on
+# the ansible-core release the failure handed to the rescue is censored or
+# not, so those cases accept either (their messages never hold the secret).
+#
+# Each case is a play of its own, so the variables it sets end with it.
+
+- name: Valid settings pass
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: valid settings pass, expect: ""}
+
+- name: Distribution not in the supported list
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: distribution not in the supported list, expect: Unsupported platform}
+    logstash_supported_distributions: [RedHat]
+
+- name: Version 8
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: version 8, expect: must be an exact 9.x.y release}
+    logstash_version: 8.19.0
+
+- name: Version that is not exact
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: version that is not exact, expect: must be an exact 9.x.y release}
+    logstash_version: "9.5"
+
+- name: Unknown package source
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: unknown package source, expect: logstash_repo_source must be elastic, satellite or none}
+    logstash_repo_source: mirror
+
+- name: Satellite without a repository id
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: satellite without a repository id, expect: Satellite needs logstash_satellite_repo_id}
+    logstash_repo_source: satellite
+
+- name: Satellite override that sets enabled
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: satellite override that sets enabled, expect: cannot set enabled}
+    logstash_repo_source: satellite
+    logstash_satellite_repo_id: ACME_Elastic_Elastic_9_x
+    logstash_satellite_repo_overrides: {enabled: "1"}
+
+- name: Replaced variable logstash_manage_repo
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: replaced variable logstash_manage_repo, expect: logstash_manage_repo was replaced}
+    logstash_manage_repo: false
+
+- name: Heap size with a unit Logstash does not take
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: heap size with a unit Logstash does not take, expect: logstash_heap_size must look like}
+    logstash_heap_size: 4GB
+
+- name: Restart on pipeline changes with automatic reload
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: restart on pipeline changes with automatic reload, expect: "'restart' requires"}
+    logstash_pipeline_change_action: restart
+
+- name: Restart batches of zero hosts
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: restart batches of zero hosts, expect: logstash_restart_batch_size must be >= 1}
+    logstash_restart_batch_size: 0
+
+- name: Misspelt queue key
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: misspelt queue key, expect: Unknown key in logstash_pipeline_defaults}
+    logstash_queue: {type: persisted, maxbytes: 1gb}
+
+- name: Unknown queue type
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: unknown queue type, expect: or invalid queue type}
+    logstash_queue: {type: disk}
+
+- name: Pipeline id with a slash
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: pipeline id with a slash, expect: Invalid pipeline 'a/b'}
+    logstash_pipelines:
+      - {id: a/b, config: "input { pipeline { address => \"ab\" } }"}
+
+- name: Misspelt pipeline key
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: misspelt pipeline key, expect: Invalid pipeline 'main'. Allowed keys}
+    logstash_pipelines:
+      - {id: main, worker: 2, config: "input { pipeline { address => \"main\" } }"}
+
+- name: Misspelt pipeline queue key
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: misspelt pipeline queue key, expect: Invalid pipeline 'main'}
+    logstash_pipelines:
+      - {id: main, queue: {type: persisted, maxbytes: 1gb}, config: "input { pipeline { address => \"main\" } }"}
+
+- name: Pipeline with both config and path_config
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: pipeline with both config and path_config, expect: Invalid pipeline 'main'}
+    logstash_pipelines:
+      - {id: main, path_config: /opt/main/*.conf, config: "input { pipeline { address => \"main\" } }"}
+
+- name: Pipeline with neither config nor path_config
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: pipeline with neither config nor path_config, expect: Invalid pipeline 'main'}
+    logstash_pipelines:
+      - {id: main, workers: 2}
+
+- name: Templates given as a string
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: templates given as a string, expect: Invalid pipeline 'main'}
+    logstash_pipelines:
+      - {id: main, templates: logstash/main.conf.j2}
+
+- name: An absent pipeline needs no definition
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: an absent pipeline needs no definition, expect: ""}
+    logstash_pipelines:
+      - {id: main, config: "input { pipeline { address => \"main\" } }"}
+      - {id: old, state: absent}
+
+- name: No pipelines
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: no pipelines, expect: needs at least one present pipeline}
+    logstash_pipelines: []
+
+- name: Only absent pipelines
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: only absent pipelines, expect: needs at least one present pipeline}
+    logstash_pipelines:
+      - {id: main, state: absent}
+
+- name: Two pipelines with one id
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: two pipelines with one id, expect: pipeline ids must be unique}
+    logstash_pipelines:
+      - {id: main, config: "input { pipeline { address => \"one\" } }"}
+      - {id: main, config: "input { pipeline { address => \"two\" } }"}
+
+- name: Plugin without a name
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: plugin without a name, expect: Plugins must be a name or a dict}
+    logstash_plugins:
+      - {version: 1.2.3}
+
+- name: Certificate name with no matching entry
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: certificate name with no matching entry, expect: censored|must match an entry in ssl_certificates}
+    logstash_ssl_certificate_names: [ls-1]
+    ssl_certificates:
+      - name: other
+        certificate: {content: not-a-real-certificate}
+        key: {content: not-a-real-private-key}
+
+- name: Certificate entry without a key
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: certificate entry without a key, expect: censored|must match an entry in ssl_certificates}
+    logstash_ssl_certificate_names: [ls-1]
+    ssl_certificates:
+      - name: ls-1
+        certificate: {content: not-a-real-certificate}
+
+- name: Port below 1024 without the capability
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: port below 1024 without the capability, expect: needs CAP_NET_BIND_SERVICE}
+    logstash_firewall_ports: [514/udp, 5044/tcp]
+
+- name: Port below 1024 with the capability
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: port below 1024 with the capability, expect: ""}
+    logstash_firewall_ports: [514/udp, 5044/tcp]
+    logstash_systemd_capabilities: [CAP_NET_BIND_SERVICE]
+
+- name: Capability without the CAP_ prefix
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: capability without the CAP_ prefix, expect: entries must look like CAP_NET_BIND_SERVICE}
+    logstash_systemd_capabilities: [NET_BIND_SERVICE]
+
+- name: Firewall port without a protocol
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: firewall port without a protocol, expect: logstash_firewall_ports entries must look like}
+    logstash_firewall_ports: ["5044"]
+
+- name: Unknown SELinux setting
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: unknown SELinux setting, expect: must be auto, true or false}
+    logstash_selinux_manage: sometimes
+
+- name: Keystore password with a double quote
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: keystore password with a double quote, expect: censored|must not contain double quotes}
+    logstash_keystore_password: pa"ss-in-the-keystore
+
+- name: API user without a password
+  ansible.builtin.import_playbook: case.yml
+  vars:
+    test_case: {name: API user without a password, expect: censored|logstash_api_auth_basic_password is required}
+    logstash_api_auth_basic_username: molecule

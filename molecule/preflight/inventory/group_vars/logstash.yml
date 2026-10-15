@@ -1,0 +1,13 @@
+---
+# Valid settings every case starts from; each case in converge.yml overrides
+# some of them with play vars.
+test_role: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+# Secrets the cases use; no failure may print one
+test_secrets:
+  - pa"ss-in-the-keystore
+  - not-a-real-private-key
+
+logstash_pipelines:
+  - id: main
+    config: 'input { pipeline { address => "main" } }'
+logstash_heap_size: 512m

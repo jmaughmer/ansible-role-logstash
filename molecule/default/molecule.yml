@@ -1,0 +1,69 @@
+---
+# Two systemd containers (rootless Podman is fine) on one network, both in the
+# inventory group "logstash", running two pipelines:
+#   ingest  http input on 8080; fields from the keystore and the service
+#           environment; memory queue
+#   beats   beats input on 5044 with TLS; persisted queue in a relocated
+#           directory, dead letter queue
+# ls-1 is also in the group "firewalld", so prepare.yml starts firewalld on it
+# only: ls-1 takes the role's firewall path and ls-2 the "not running" one.
+#
+# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
+# rockylinux10) — see the README's "Testing" section. The playbooks and
+# inventory here are shared with the other scenarios.
+#
+# Inside containers SELinux is off and fapolicyd isn't installed, so this
+# exercises the role's skip paths for both.
+#
+# The sequence adds side_effect.yml (reloads, rolling restarts, a refused
+# pipeline) and `check` (converge in check mode on the installed hosts, which
+# the README says works) after the idempotence check.
+role_name_check: 1
+
+dependency:
+  name: galaxy   # installs requirements.yml next to this file
+
+driver:
+  name: podman
+
+platforms:
+  - name: ls-1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false   # keep the image's own CMD: systemd as PID 1
+    systemd: always
+    privileged: true          # firewalld loads nftables rules
+    network: logstash_molecule   # created by the driver from the first platform
+    groups: [logstash, firewalld]
+
+  - name: ls-2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    privileged: true
+    network: logstash_molecule
+    groups: [logstash]
+
+provisioner:
+  name: ansible
+  inventory:
+    links:
+      group_vars: inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - check
+    - verify
+    - destroy

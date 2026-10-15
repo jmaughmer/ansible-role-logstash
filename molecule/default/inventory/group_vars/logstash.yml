@@ -1,0 +1,102 @@
+---
+# Shared by every scenario that converges the pair (inventory links in each
+# molecule.yml). The test_* values are what side_effect.yml and verify.yml
+# check against; side_effect.yml overrides the logstash_* names with
+# variations on them.
+
+# Written by prepare.yml on each host
+test_tls_dir: /root/molecule-tls
+test_tls_passphrase: molecule-key-pass
+
+# Each pipeline writes the events it receives here, one JSON document a line
+test_output_dir: /var/lib/logstash/molecule
+# Outside logstash_path_data, so the role has to create it
+test_queue_dir: /var/lib/logstash-queue
+
+test_keystore_secret: from-the-keystore
+test_api_user: molecule
+# Meets the API's password policy: upper and lower case, a digit, a symbol
+test_api_password: Molecule-Api-Pass-1!
+# Shows up in every ingest event; side_effect.yml changes it to force a reload
+test_ingest_revision: 1
+
+# Small, but still a persisted queue and dead letter queue for the disk check
+# and the directories
+test_pipelines:
+  - id: ingest
+    workers: 1
+    config: |
+      input { http { port => 8080 } }
+      filter {
+        mutate {
+          add_field => {
+            "[molecule][secret]" => "${MOLECULE_SECRET}"
+            "[molecule][env]" => "${MOLECULE_ENV}"
+            "[molecule][host]" => "{{ inventory_hostname }}"
+            "[molecule][revision]" => "{{ test_ingest_revision }}"
+          }
+        }
+      }
+    templates:
+      - molecule/file-output.conf.j2
+
+  - id: beats
+    batch_size: 250
+    queue:
+      type: persisted
+      max_bytes: 64mb
+      page_capacity: 16mb
+      path: "{{ test_queue_dir }}"
+    dead_letter_queue:
+      enable: true
+      max_bytes: 32mb
+    config: |
+      input {
+        beats {
+          port => 5044
+          ssl_enabled => true
+          ssl_certificate => "/etc/logstash/certs/molecule.crt"
+          ssl_key => "/etc/logstash/certs/molecule.pkcs8.key"
+        }
+      }
+    templates:
+      - molecule/file-output.conf.j2
+
+logstash_pipelines: "{{ test_pipelines }}"
+
+# Two JVMs per host during validation; keep both small
+logstash_heap_size: 512m
+logstash_pipeline_validate_heap: 512m
+logstash_jvm_options:
+  - -Dmolecule.marker=true
+
+logstash_keystore_password: molecule-keystore-pass
+logstash_keystore_entries:
+  MOLECULE_SECRET: "{{ test_keystore_secret }}"
+logstash_api_auth_basic_username: "{{ test_api_user }}"
+logstash_api_auth_basic_password: "{{ test_api_password }}"
+
+logstash_environment:
+  MOLECULE_ENV: from-sysconfig
+
+ssl_certificates:
+  - name: molecule
+    certificate:
+      path: "{{ test_tls_dir }}/molecule.crt"
+    key:
+      path: "{{ test_tls_dir }}/molecule.key"
+      passphrase: "{{ test_tls_passphrase }}"
+logstash_ssl_certificate_names: [molecule]
+
+logstash_systemd_nice: 0
+logstash_systemd_timeout_stop_sec: 120
+
+logstash_firewall_ports:
+  - 8080/tcp
+  - 5044/tcp
+
+# Show what was rendered if a run fails.
+logstash_no_log: false
+# Retry less: a failure in a container is not a flaky satellite link.
+logstash_task_retries: 1
+logstash_task_delay: 5

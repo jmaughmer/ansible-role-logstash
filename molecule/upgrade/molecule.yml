@@ -1,0 +1,57 @@
+---
+# Rolling upgrade: prepare.yml installs and starts the previous release on
+# both hosts with the default scenario's settings, then converge applies the
+# role's default logstash_version. verify.yml checks the hosts were upgraded
+# one at a time and run the new release, then runs the default verification.
+#   molecule test -s upgrade
+role_name_check: 1
+
+dependency:
+  name: galaxy
+  options:
+    requirements-file: ${MOLECULE_SCENARIO_DIRECTORY}/../default/requirements.yml
+
+driver:
+  name: podman
+
+platforms:
+  - name: ls-u1
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    privileged: true
+    network: logstash_upgrade
+    groups: [logstash, firewalld]
+
+  - name: ls-u2
+    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
+    pre_build_image: true
+    override_command: false
+    systemd: always
+    privileged: true
+    network: logstash_upgrade
+    groups: [logstash]
+
+provisioner:
+  name: ansible
+  playbooks:
+    converge: ../default/converge.yml
+  inventory:
+    links:
+      group_vars: ../default/inventory/group_vars/
+
+verifier:
+  name: ansible
+
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

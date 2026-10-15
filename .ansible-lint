@@ -1,0 +1,20 @@
+---
+profile: production
+
+exclude_paths:
+  - .ansible/
+  - .github/
+
+# The example playbook applies the role by name; it is installed from
+# examples/requirements.yml, not present here.
+mock_roles:
+  - logstash
+
+# Findings in the role's tasks that predate the linting; reported, but not
+# failing the run until they are cleaned up.
+warn_list:
+  - command-instead-of-module
+  - no-changed-when
+  - no-handler
+  - name[casing]
+  - name[template]

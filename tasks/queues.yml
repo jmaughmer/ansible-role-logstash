@@ -16,6 +16,7 @@
   ansible.builtin.set_fact:
     _ls_pq: []
     _ls_pq_by_mount: {}
+    _ls_pq_free: {}
 
 - name: Queues | Build persisted queue plan
   ansible.builtin.set_fact:
@@ -56,44 +57,49 @@
     - logstash_queue_disk_check | bool
     - _ls_pq | length > 0
 
+# The filesystem and free space come from df on each queue's base directory
+# (created above). Ansible's mount facts can leave a filesystem out, such as a
+# container's overlay root.
+- name: Queues | Measure free space on the queue filesystems
+  ansible.builtin.command:
+    argv: "{{ ['df', '--block-size=1', '--output=target,avail', '--'] + (_ls_pq | map(attribute='dir') | map('dirname') | unique | list) }}"
+  register: _ls_pq_df
+  changed_when: false
+  check_mode: false
+  when:
+    - logstash_queue_disk_check | bool
+    - _ls_pq | length > 0
+
 # Space still needed per filesystem = sum(max_bytes - bytes already used by that queue)
 - name: Queues | Sum queue capacity per filesystem
   ansible.builtin.set_fact:
     _ls_pq_by_mount: >-
       {{ _ls_pq_by_mount | combine({_ls_mount: (_ls_pq_by_mount[_ls_mount] | default(0) | int)
                                                + item.max_bytes - (_ls_pq_used[item.dir] | default(0) | int)}) }}
+    _ls_pq_free: "{{ _ls_pq_free | combine({_ls_mount: _ls_df_line | regex_search('[0-9]+$') | int}) }}"
   vars:
     _ls_pq_used: >-
       {{ dict((_ls_pq_du.stdout_lines | default([]) | map('regex_replace', '^[0-9]+\t', '') | list)
               | zip(_ls_pq_du.stdout_lines | default([]) | map('regex_replace', '\t.*$', '') | map('int') | list)) }}
-    _ls_mount: >-
-      {%- set ns = namespace(mount='/', length=0) -%}
-      {%- for m in ansible_facts['mounts'] | default([]) -%}
-      {%-   set prefix = m.mount.rstrip('/') ~ '/' -%}
-      {%-   if (item.dir ~ '/').startswith(prefix) and (prefix | length) > ns.length -%}
-      {%-     set ns.mount = m.mount -%}
-      {%-     set ns.length = prefix | length -%}
-      {%-   endif -%}
-      {%- endfor -%}
-      {{ ns.mount }}
+    # df prints a header, then one line per argument, in order
+    _ls_df_line: >-
+      {{ dict(_ls_pq | map(attribute='dir') | map('dirname') | unique | list
+              | zip(_ls_pq_df.stdout_lines[1:]))[item.dir | dirname] }}
+    _ls_mount: "{{ _ls_df_line | regex_replace('\\s+[0-9]+$', '') | trim }}"
   loop: "{{ _ls_pq }}"
   loop_control:
     label: "{{ item.id }}"
-  when:
-    - logstash_queue_disk_check | bool
-    - ansible_facts['mounts'] is defined
+  when: logstash_queue_disk_check | bool
 
 - name: Queues | Verify filesystems can hold every persisted queue
   ansible.builtin.assert:
     that:
-      - item.value <= _ls_fs.size_available
+      - item.value <= _ls_pq_free[item.key]
     fail_msg: >-
       Persisted queues on {{ item.key }} may grow by {{ (item.value / 1073741824) | round(2) }} GiB
-      but only {{ (_ls_fs.size_available / 1073741824) | round(2) }} GiB is free. Lower queue.max_bytes,
+      but only {{ (_ls_pq_free[item.key] / 1073741824) | round(2) }} GiB is free. Lower queue.max_bytes,
       move path.queue to a larger filesystem, or set logstash_queue_disk_check: false.
     quiet: true
-  vars:
-    _ls_fs: "{{ ansible_facts['mounts'] | selectattr('mount', 'equalto', item.key) | first }}"
   loop: "{{ _ls_pq_by_mount | dict2items }}"
   loop_control:
     label: "{{ item.key }}"

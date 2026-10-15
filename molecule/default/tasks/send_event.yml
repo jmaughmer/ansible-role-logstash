@@ -1,0 +1,35 @@
+---
+# Posts {"message": test_message} to the ingest pipeline on test_target
+# (default: this host), then waits for test_receiver's ingest output to hold
+# it and sets test_event there to the last event with that message.
+# Every host in the play takes part, so cross-host sends need the same
+# hosts as receivers.
+- name: Send an event to the ingest pipeline
+  ansible.builtin.uri:
+    url: "http://{{ test_target | default('127.0.0.1') }}:8080/"
+    method: POST
+    body_format: json
+    body:
+      message: "{{ test_message }}"
+  register: test_post
+  # The input may still be starting after a reload or restart
+  until: test_post.status == 200
+  retries: 30
+  delay: 2
+
+- name: Wait for the event to be written
+  ansible.builtin.wait_for:
+    path: "{{ test_output_dir }}/ingest.json"
+    search_regex: '"message":"{{ test_receive_message | default(test_message) | regex_escape }}"'
+    timeout: 60
+
+- name: Read the ingest output
+  ansible.builtin.slurp:
+    src: "{{ test_output_dir }}/ingest.json"
+  register: test_output
+
+- name: Pick the event out
+  ansible.builtin.set_fact:
+    test_event: >-
+      {{ (test_output.content | b64decode).splitlines() | select | map('from_json')
+         | selectattr('message', 'equalto', test_receive_message | default(test_message)) | last }}

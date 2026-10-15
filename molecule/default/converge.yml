@@ -1,0 +1,14 @@
+---
+# Both hosts in one play, as in examples/playbook.yml: restarts are batched
+# by the role from the first host. The role is included by the repository's
+# path, which works whatever the roles path is (newer Molecule releases no
+# longer add the project's parent directory to it).
+- name: Converge
+  hosts: logstash
+  become: true
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"

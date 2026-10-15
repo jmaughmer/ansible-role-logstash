@@ -1,0 +1,62 @@
+---
+# The images are minimal: without iproute there are no network facts (the
+# verification sends events to the other host's address), and without the
+# openssl CLI the role cannot convert keys to PKCS#8.
+- name: Prepare
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Install iproute and openssl
+      ansible.builtin.dnf:
+        name: [iproute, openssl]
+        state: present
+
+    # Stands in for a certificate delivered by another role: the role copies
+    # it from this path on the host. The key is encrypted, so the role has to
+    # use the passphrase to make the PKCS#8 copy the beats input reads.
+    - name: Create the TLS directory
+      ansible.builtin.file:
+        path: "{{ test_tls_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Issue a self-signed certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -keyout
+          - "{{ test_tls_dir }}/molecule.key"
+          - -passout
+          - "pass:{{ test_tls_passphrase }}"
+          - -out
+          - "{{ test_tls_dir }}/molecule.crt"
+          - -days
+          - "30"
+          - -subj
+          - "/CN={{ inventory_hostname }}"
+          - -addext
+          - "subjectAltName=DNS:{{ inventory_hostname }},IP:127.0.0.1"
+        creates: "{{ test_tls_dir }}/molecule.crt"
+
+# firewalld running on ls-1 means the role's firewall tasks open the ports
+# there, while ls-2 reports there is nothing to add them to.
+- name: Start firewalld
+  hosts: firewalld
+  gather_facts: false
+  tasks:
+    - name: Install firewalld
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Start firewalld
+      ansible.builtin.systemd_service:
+        name: firewalld
+        state: started
+        enabled: true

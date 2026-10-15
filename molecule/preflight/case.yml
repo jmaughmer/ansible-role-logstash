@@ -1,0 +1,50 @@
+---
+# One case from converge.yml: test_case comes from its import, together with
+# the role variables the case overrides (play vars, so they apply to this
+# case only). Runs facts and preflight, then checks the outcome.
+- name: Preflight case | {{ test_case.name | default('') }}
+  hosts: logstash
+  become: true
+  gather_facts: true
+  tasks:
+    # Facts outlive the play, so clear the previous case's outcome.
+    - name: Reset the outcome | {{ test_case.name }}
+      ansible.builtin.set_fact:
+        test_failed: false
+        test_failure: ""
+
+    - name: Run the role's preflight | {{ test_case.name }}
+      block:
+        - name: Gather the role's facts | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: facts
+
+        - name: Run the preflight checks | {{ test_case.name }}
+          ansible.builtin.include_role:
+            name: "{{ test_role }}"
+            tasks_from: preflight
+
+      rescue:
+        # The whole result, so a censored (no_log) failure can be checked
+        # for leaked secrets too. Not JSON, which would escape the quote in
+        # one of them.
+        - name: Record the failure | {{ test_case.name }}
+          ansible.builtin.set_fact:
+            test_failed: true
+            test_failure: "{{ ansible_failed_result | string }}"
+
+    - name: Check the outcome | {{ test_case.name }}
+      vars:
+        test_leaked: "{{ test_secrets | select('in', test_failure) | list }}"
+      ansible.builtin.assert:
+        that:
+          - test_failed == (test_case.expect | length > 0)
+          - not test_failed or test_failure is search(test_case.expect)
+          - test_leaked | length == 0
+        fail_msg: >-
+          Case '{{ test_case.name }}': expected
+          {{ 'a failure matching ' ~ test_case.expect if test_case.expect | length > 0 else 'no failure' }},
+          got {{ ('a failure: ' ~ test_failure) if test_failed else 'none' }}.
+          {{ 'The failure printed a secret.' if test_leaked | length > 0 else '' }}
+        quiet: true

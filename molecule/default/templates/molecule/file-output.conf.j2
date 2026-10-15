@@ -1,0 +1,6 @@
+output {
+  file {
+    path => "{{ test_output_dir }}/{{ _ls_pipeline.id }}.json"
+    codec => json_lines
+  }
+}

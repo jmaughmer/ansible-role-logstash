@@ -1,0 +1,232 @@
+---
+# Each host sends events to the other's address, so gather everyone's facts
+# first.
+- name: Gather facts from every instance
+  hosts: all
+  gather_facts: true
+  tasks: []
+
+- name: Verify the installation and configuration
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars:
+    test_api: http://127.0.0.1:9600
+  tasks:
+    - name: Read the role's defaults
+      ansible.builtin.include_vars:
+        file: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}/defaults/main.yml"
+        name: test_defaults
+
+    - name: Read the installed packages
+      ansible.builtin.package_facts:
+
+    - name: Read the service state
+      ansible.builtin.service_facts:
+
+    - name: Check the requested version is installed, running and enabled
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.packages.logstash | map(attribute='version') | list == [test_defaults.logstash_version]
+          - ansible_facts.services['logstash.service'].state == 'running'
+          - ansible_facts.services['logstash.service'].status == 'enabled'
+
+    - name: Check the API refuses requests without credentials
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_node"
+        status_code: 401
+
+    - name: Read the node and its pipelines
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_node/pipelines"
+        url_username: "{{ test_api_user }}"
+        url_password: "{{ test_api_password }}"
+        force_basic_auth: true
+      register: test_node
+
+    - name: Read the pipeline statistics
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_node/stats/pipelines"
+        url_username: "{{ test_api_user }}"
+        url_password: "{{ test_api_password }}"
+        force_basic_auth: true
+      register: test_node_stats
+
+    - name: Check the running version, pipelines and their settings
+      vars:
+        test_running: "{{ test_node.json.pipelines }}"
+        test_stats: "{{ test_node_stats.json.pipelines }}"
+      ansible.builtin.assert:
+        that:
+          - test_node.json.version == test_defaults.logstash_version
+          # a removed pipeline stays listed, without event statistics
+          - >-
+            test_stats | dict2items | selectattr('value.events', 'mapping') | map(attribute='key')
+            | reject('match', '^[.]') | sort == ['beats', 'ingest']
+          - test_running.ingest.workers == 1
+          - test_running.beats.batch_size == 250
+          - test_running.beats.dead_letter_queue_enabled
+          - test_stats.beats.queue.type == 'persisted'
+          - test_stats.ingest.queue.type == 'memory'
+        fail_msg: "{{ test_node.json | to_json }}"
+
+    - name: Read the unit's settings
+      ansible.builtin.systemd_service:
+        name: logstash
+      register: test_unit
+
+    - name: Check the systemd drop-in took effect
+      ansible.builtin.assert:
+        that:
+          - test_unit.status.Nice == '0'
+          - test_unit.status.LimitNOFILE == '65535'
+          - test_unit.status.TimeoutStopUSec == '2min'
+        fail_msg: "{{ test_unit.status | dict2items | selectattr('key', 'in', ['Nice', 'LimitNOFILE', 'TimeoutStopUSec']) | items2dict | to_json }}"
+
+    - name: Check ownership and permissions
+      ansible.builtin.stat:
+        path: "{{ item.path }}"
+      register: test_file
+      failed_when: >-
+        not test_file.stat.exists
+        or test_file.stat.mode != item.mode
+        or test_file.stat.pw_name != item.owner
+        or test_file.stat.gr_name != item.group
+      loop:
+        - {path: /etc/logstash/logstash.yml, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/logstash/pipelines.yml, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/logstash/pipelines.d, mode: "0750", owner: root, group: logstash}
+        - {path: /etc/logstash/pipelines.d/ingest.conf, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/logstash/pipelines.d/beats.conf, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/sysconfig/logstash, mode: "0600", owner: root, group: root}
+        - {path: /etc/logstash/logstash.keystore, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/logstash/.ansible-keystore-state.json, mode: "0600", owner: root, group: root}
+        - {path: /etc/logstash/certs, mode: "0750", owner: root, group: logstash}
+        - {path: /etc/logstash/certs/molecule.crt, mode: "0644", owner: root, group: logstash}
+        - {path: /etc/logstash/certs/molecule.key, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/logstash/certs/molecule.pkcs8.key, mode: "0640", owner: root, group: logstash}
+        - {path: /etc/systemd/system/logstash.service.d/override.conf, mode: "0644", owner: root, group: root}
+        - {path: /usr/local/libexec/ansible-logstash-validate-pipeline, mode: "0750", owner: root, group: root}
+        - {path: "{{ test_queue_dir }}", mode: "0750", owner: logstash, group: logstash}
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: Check the queues were created where they were asked for
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: test_dir
+      failed_when: not (test_dir.stat.isdir | default(false))
+      loop:
+        - "{{ test_queue_dir }}/beats"
+        - /var/lib/logstash/dead_letter_queue/beats
+
+    - name: Read jvm.options and the service environment
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      register: test_conf
+      loop:
+        - /etc/logstash/jvm.options
+        - /etc/sysconfig/logstash
+
+    - name: Check the heap, the extra JVM option and the environment
+      vars:
+        test_jvm: "{{ test_conf.results[0].content | b64decode }}"
+        test_env: "{{ test_conf.results[1].content | b64decode }}"
+      ansible.builtin.assert:
+        that:
+          - test_jvm is search('^-Xms512m$', multiline=True)
+          - test_jvm is search('^-Xmx512m$', multiline=True)
+          - test_jvm is search('^-Dmolecule.marker=true$', multiline=True)
+          - test_jvm is not search('restarted')
+          - test_env is search('^LOGSTASH_KEYSTORE_PASS="molecule-keystore-pass"$', multiline=True)
+          - test_env is search('^MOLECULE_ENV="from-sysconfig"$', multiline=True)
+
+    - name: List the keystore
+      ansible.builtin.command: /usr/share/logstash/bin/logstash-keystore --path.settings /etc/logstash list
+      environment:
+        LOGSTASH_KEYSTORE_PASS: molecule-keystore-pass
+      register: test_keystore
+      changed_when: false
+
+    - name: Check the keystore holds the managed entries
+      ansible.builtin.assert:
+        that:
+          - "'molecule_secret' in (test_keystore.stdout_lines | map('lower'))"
+          - "'logstash_api_password' in (test_keystore.stdout_lines | map('lower'))"
+        fail_msg: "{{ test_keystore.stdout_lines | to_json }}"
+
+    - name: Check the PKCS#8 copy of the key is unencrypted and matches the supplied key
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          head -1 /etc/logstash/certs/molecule.pkcs8.key | grep -qx -- '-----BEGIN PRIVATE KEY-----'
+          [ "$(openssl pkey -in /etc/logstash/certs/molecule.pkcs8.key -pubout)" = \
+            "$(openssl pkey -in /etc/logstash/certs/molecule.key -passin pass:{{ test_tls_passphrase }} -pubout)" ]
+        executable: /bin/bash
+      changed_when: false
+
+    - name: Read the certificate the beats input serves
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          openssl s_client -connect 127.0.0.1:5044 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+        executable: /bin/bash
+      register: test_served
+      changed_when: false
+
+    - name: Read the installed certificate
+      ansible.builtin.command: openssl x509 -in /etc/logstash/certs/molecule.crt -noout -fingerprint -sha256
+      register: test_installed
+      changed_when: false
+
+    - name: Check the beats input serves the installed certificate
+      ansible.builtin.assert:
+        that:
+          - test_served.stdout == test_installed.stdout
+
+- name: Verify the firewall on the host running firewalld
+  hosts: firewalld
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the open ports, now and permanently
+      ansible.builtin.command: "firewall-cmd {{ item }} --zone=public --list-ports"
+      register: test_ports
+      changed_when: false
+      loop: ["", --permanent]
+
+    - name: Check the input ports are open
+      ansible.builtin.assert:
+        that:
+          - item.stdout.split() | sort == ['5044/tcp', '8080/tcp']
+        fail_msg: "{{ item.item }}: {{ item.stdout }}"
+      loop: "{{ test_ports.results }}"
+      loop_control:
+        label: "{{ item.item or 'runtime' }}"
+
+# Each host sends an event to the other's address, so the input is reachable
+# from the network (through ls-1's firewall), and checks the event its peer
+# sent: it carries the keystore secret and the service environment, which
+# shows both reached the pipeline.
+- name: Verify events flow between the hosts
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars:
+    test_peer: "{{ groups['logstash'] | reject('equalto', inventory_hostname) | first }}"
+  tasks:
+    - name: Send an event to the peer and wait for the peer's
+      ansible.builtin.include_tasks: tasks/send_event.yml
+      vars:
+        test_target: "{{ hostvars[test_peer].ansible_facts.default_ipv4.address }}"
+        test_message: "verify-from-{{ inventory_hostname }}"
+        test_receive_message: "verify-from-{{ test_peer }}"
+
+    - name: Check the event went through the pipeline
+      ansible.builtin.assert:
+        that:
+          - test_event.molecule.secret == test_keystore_secret
+          - test_event.molecule.env == 'from-sysconfig'
+          - test_event.molecule.host == inventory_hostname
+          - test_event.molecule.revision == test_ingest_revision | string
+        fail_msg: "{{ test_event | to_json }}"
