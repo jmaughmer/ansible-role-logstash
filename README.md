@@ -490,10 +490,10 @@ into new gem directories, which the `logstash` user cannot load. What the role d
 - It rewrites the entries after any install, update or removal, before it validates pipelines or
   restarts Logstash. Logstash keeps running the old release until the rolling restart.
 - A run that stops between the update and the rewrite, or a change made by hand with
-  `logstash-plugin` or the package manager, leaves entries that no longer match. The role rewrites
-  them on the next run when a directory under `logstash_home` has changed since the trust file was
-  written. They are also rewritten when the role would trust different paths than last time, which
-  it records next to the trust file in `/etc/fapolicyd/ansible-logstash.ansible.json`.
+  `logstash-plugin` or the package manager, leaves entries that no longer match. Next to the trust
+  file, in `/etc/fapolicyd/ansible-logstash.ansible.json`, the role records what the entries were
+  written for: the installed package, a checksum of `Gemfile.lock`, and the paths it trusts. It
+  rewrites them on the next run when any of these differs.
 - The denials are audited, so `ausearch -m fanotify -ts recent` shows them while the entries are
   out of date.
 

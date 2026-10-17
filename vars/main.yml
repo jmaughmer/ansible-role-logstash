@@ -111,6 +111,13 @@ _ls_fapolicyd_state_file: "/etc/fapolicyd/{{ logstash_fapolicyd_trust_file }}.an
 # the JDK's helper executables in jdk/lib (jspawnhelper starts child
 # processes).
 _ls_fapolicyd_rpm_patterns: ["*.so", "*.so.*", jspawnhelper, jexec]
+# rpm's view of the package and the plugin lock file, see fapolicyd.yml
+_ls_fapolicyd_fingerprint_argv:
+  - /bin/bash
+  - -c
+  - set -o pipefail; { rpm -q logstash; cat "$1/Gemfile.lock"; } | sha256sum | cut -d ' ' -f 1
+  - fapolicyd-fingerprint
+  - "{{ logstash_home }}"
 _ls_fapolicyd_spec: >-
   {{ {'home': logstash_home, 'paths': _ls_fapolicyd_paths, 'patterns': _ls_fapolicyd_rpm_patterns,
       'jffi_dir': logstash_fapolicyd_jffi_dir} }}

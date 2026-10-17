@@ -51,28 +51,18 @@
       failed_when: false
       when: _ls_fapolicyd_file.stat.exists
 
-    # Package upgrades and logstash-plugin add and remove files, which updates
-    # their directories' modification times. One newer than the trust file
-    # means Logstash or its plugins changed after the entries were written: by
-    # hand, or in a run that stopped before it refreshed them. Four levels
-    # reach vendor/bundle/jruby/<version>/gems.
-    - name: fapolicyd | Look for changes made since the entries were written
+    # What the entries cover changes with the package and with the plugins,
+    # whose versions Gemfile.lock records. A fingerprint that differs from
+    # the recorded one means a change after the entries were written: by
+    # hand, or in a run that stopped before it refreshed them. Directory
+    # modification times would not do: logstash-plugin update rewrites files
+    # even when it changes nothing.
+    - name: fapolicyd | Read the package and plugin fingerprint
       ansible.builtin.command:
-        argv:
-          - find
-          - "{{ logstash_home }}"
-          - -maxdepth
-          - "4"
-          - -type
-          - d
-          - -newer
-          - "{{ _ls_fapolicyd_trust_file }}"
-          - -print
-          - -quit
-      register: _ls_fapolicyd_stale
+        argv: "{{ _ls_fapolicyd_fingerprint_argv }}"
+      register: _ls_fapolicyd_fingerprint
       changed_when: false
       check_mode: false
-      when: _ls_fapolicyd_file.stat.exists
 
     # The entries hold a size and a checksum per file, so they are rewritten
     # whenever the files they cover have changed.
@@ -86,7 +76,7 @@
       when: >-
         (not _ls_fapolicyd_file.stat.exists)
         or (_ls_plugins_changed | default(false) | bool)
-        or (_ls_fapolicyd_stale.stdout | default('') | length > 0)
-        or (_ls_fapolicyd_state_read.content | default('') | b64decode | trim) != (_ls_fapolicyd_spec | to_json)
+        or (_ls_fapolicyd_state_read.content | default('e30=') | b64decode | from_json)
+           != {'spec': _ls_fapolicyd_spec, 'fingerprint': _ls_fapolicyd_fingerprint.stdout}
         or (_ls_validate_helper is defined and _ls_validate_helper is changed)
         or (logstash_fapolicyd_force_trust | bool)
