@@ -5,10 +5,11 @@
 # trusted explicitly or fapolicyd refuses to run them. Nor are the shared
 # libraries the Logstash package ships, such as the bundled JDK's: the default
 # fapolicyd-filter.conf leaves usr/share/ out of the rpm trust except for
-# scripts and archives, so Java cannot start as the logstash user. And JRuby's
-# FFI library would be unpacked from jruby.jar to a new temporary file on every
-# start, which nothing can trust in advance, so it is unpacked once to a fixed
-# directory, trusted there, and jvm.options points JRuby at it.
+# scripts and archives, so Java cannot start as the logstash user. And native
+# libraries shipped inside jars (JRuby's FFI, zstd-jni) would be unpacked to a
+# new temporary file on every start, which nothing can trust in advance, so
+# they are unpacked once to a fixed directory, trusted there, and jvm.options
+# points Java at it.
 # Published as a fact: a rolling upgrade updates plugins on each host and
 # refreshes its entries from the host that runs the upgrade, which cannot see
 # this host's role variables through hostvars.
@@ -18,7 +19,7 @@
       {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file,
           'home': logstash_home, 'patterns': _ls_fapolicyd_rpm_patterns,
           'state': _ls_fapolicyd_state_file, 'spec': _ls_fapolicyd_spec,
-          'jffi_dir': logstash_fapolicyd_jffi_dir, 'jffi_platform': _ls_jffi_platform}
+          'native_dir': logstash_fapolicyd_native_dir, 'native_libs': _ls_native_libs}
          if _ls_fapolicyd_manage | bool else {} }}
 
 - name: fapolicyd | Manage the trust database

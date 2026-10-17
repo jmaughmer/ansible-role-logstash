@@ -8,64 +8,72 @@
 #                        _ls_fapolicyd_trust fact gives the paths, the trust
 #                        file and the Logstash home
 
-- name: "fapolicyd | Create the FFI library directory on {{ _ls_fapolicyd_host }}"
+- name: "fapolicyd | Create the native library directory on {{ _ls_fapolicyd_host }}"
   ansible.builtin.file:
-    path: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir }}"
+    path: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.native_dir }}"
     state: directory
     owner: root
     group: root
     mode: "0755"
   delegate_to: "{{ _ls_fapolicyd_host }}"
 
-# Python, because the hosts have no unzip for ansible.builtin.unarchive. The
-# library is rewritten only when the package's copy differs, and copies from
-# other jffi versions are removed.
-- name: "fapolicyd | Unpack JRuby's FFI library on {{ _ls_fapolicyd_host }}"
+# Python, because the hosts have no unzip for ansible.builtin.unarchive. A
+# library is rewritten only when the package's copy differs, and files no
+# longer wanted (other versions) are removed.
+- name: "fapolicyd | Unpack the native libraries from their jars on {{ _ls_fapolicyd_host }}"
   ansible.builtin.command:
-    argv:
-      - /usr/bin/python3
-      - -c
-      - "{{ _ls_jffi_script }}"
-      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.home }}/vendor/jruby/lib/jruby.jar"
-      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_platform }}"
-      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir }}"
+    argv: >-
+      {{ ['/usr/bin/python3', '-c', _ls_native_script, hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.home,
+          hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.native_dir,
+          hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.native_libs | to_json] }}
   vars:
-    _ls_jffi_script: |
-      import os, re, sys, zipfile
-      jar, platform, dest = sys.argv[1:]
-      pattern = re.compile(r"jni/%s/libjffi-[0-9.]+[.]so" % re.escape(platform))
-      with zipfile.ZipFile(jar) as z:
-          names = [n for n in z.namelist() if pattern.fullmatch(n)]
-          if len(names) != 1:
-              sys.exit("expected one jffi library for %s in %s, found %s" % (platform, jar, names))
-          data = z.read(names[0])
-      name = os.path.basename(names[0])
-      path = os.path.join(dest, name)
-      stale = [f for f in os.listdir(dest) if f.startswith("libjffi-") and f != name]
-      for f in stale:
-          os.remove(os.path.join(dest, f))
-      try:
-          with open(path, "rb") as f:
-              same = f.read() == data
-      except FileNotFoundError:
-          same = False
-      if not same:
-          with open(path + ".tmp", "wb") as f:
-              f.write(data)
-          os.chmod(path + ".tmp", 0o644)
-          os.replace(path + ".tmp", path)
-      if stale or not same:
+    _ls_native_script: |
+      import glob, json, os, re, sys
+      import zipfile
+      home, dest, libs = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+      wanted, changed = set(), False
+      for lib in libs:
+          jars = sorted(glob.glob(os.path.join(home, lib["jar"])))
+          if not jars:
+              if lib["required"]:
+                  sys.exit("no jar matches %s under %s" % (lib["jar"], home))
+              continue
+          pattern = re.compile(lib["entry"])
+          with zipfile.ZipFile(jars[-1]) as z:
+              names = [n for n in z.namelist() if pattern.fullmatch(n)]
+              if len(names) != 1:
+                  sys.exit("expected one %s in %s, found %s" % (lib["entry"], jars[-1], names))
+              data = z.read(names[0])
+          name = os.path.basename(names[0])
+          wanted.add(name)
+          path = os.path.join(dest, name)
+          try:
+              with open(path, "rb") as f:
+                  same = f.read() == data
+          except FileNotFoundError:
+              same = False
+          if not same:
+              with open(path + ".tmp", "wb") as f:
+                  f.write(data)
+              os.chmod(path + ".tmp", 0o644)
+              os.replace(path + ".tmp", path)
+              changed = True
+      for f in os.listdir(dest):
+          if f not in wanted:
+              os.remove(os.path.join(dest, f))
+              changed = True
+      if changed:
           print("changed")
   delegate_to: "{{ _ls_fapolicyd_host }}"
-  register: _ls_jffi_unpacked
-  changed_when: "'changed' in _ls_jffi_unpacked.stdout"
+  register: _ls_native_unpacked
+  changed_when: "'changed' in _ls_native_unpacked.stdout"
 
 - name: "fapolicyd | Check which paths exist on {{ _ls_fapolicyd_host }}"
   ansible.builtin.stat:
     path: "{{ item }}"
   loop: >-
     {{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.paths
-       + [hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir] }}
+       + [hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.native_dir] }}
   delegate_to: "{{ _ls_fapolicyd_host }}"
   register: _ls_fapolicyd_path_stat
 

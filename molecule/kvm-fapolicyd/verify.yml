@@ -49,9 +49,9 @@
         url: http://127.0.0.1:8080
         method: POST
         body_format: json
+        # Not url.domain: the http input sets that from the request
         body:
-          url:
-            domain: www.example.co.uk
+          site: www.example.co.uk
 
     - name: Wait for the event
       ansible.builtin.command:
@@ -68,8 +68,10 @@
       changed_when: false
       failed_when: test_denials.rc not in [0, 1]
 
-    - name: Check nothing Logstash uses was denied
+    # Anything at all: a library Java unpacks to /tmp shows up only as an
+    # open by Logstash's Java, not as a path under its home
+    - name: Check fapolicyd denied nothing
       ansible.builtin.assert:
         that:
-          - test_denials.stdout is not search('/usr/share/logstash|/usr/local/libexec')
+          - test_denials.rc == 1
         fail_msg: "{{ test_denials.stdout_lines }}"

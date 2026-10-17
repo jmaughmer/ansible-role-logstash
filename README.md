@@ -463,18 +463,21 @@ and archives. Root is not affected, which is why `logstash-plugin` still works, 
   trusted (`error while loading shared libraries: libjli.so`). The JDK's `jspawnhelper`, which starts
   child processes, is refused too. The role trusts every `*.so` file, `jspawnhelper` and `jexec`
   under `logstash_home` that the paths below do not already cover.
-- JRuby's FFI library, which Logstash needs at startup, lives inside `jruby.jar`. JRuby unpacks it
-  to a new temporary file on every start, which nothing can trust in advance, so Logstash stops with
-  `Could not load FFI Provider`. The role unpacks it once to `logstash_fapolicyd_jffi_dir`
-  (`/usr/local/lib/ansible-logstash`), trusts it there, and adds `-Djffi.boot.library.path` to
-  `jvm.options` so JRuby loads that copy.
+- Some native libraries live inside jars and are unpacked to a new temporary file on every start,
+  which nothing can trust in advance. JRuby's FFI library is needed to start at all (`Could not load
+  FFI Provider`); zstd-jni's is denied when the first event arrives. The role unpacks both once to
+  `logstash_fapolicyd_native_dir` (`/usr/local/lib/ansible-logstash`), trusts them there, and adds
+  `-Djffi.boot.library.path` and `-Djava.library.path` to `jvm.options` so Java loads those copies.
+  The Kafka and WebHDFS integrations carry their own (zstd-jni, lz4-java, snappy-java), which this
+  does not cover: if you use them, check `ausearch -m fanotify` and point those libraries at a
+  trusted copy with their own system properties.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `logstash_fapolicyd_trust` | `auto` | `auto` acts only when fapolicyd is running; `true` always; `false` never |
 | `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust, besides the shared libraries |
 | `logstash_fapolicyd_trust_file` | `ansible-logstash` | File under `/etc/fapolicyd/trust.d/` |
-| `logstash_fapolicyd_jffi_dir` | `/usr/local/lib/ansible-logstash` | Where JRuby's FFI library is unpacked and trusted |
+| `logstash_fapolicyd_native_dir` | `/usr/local/lib/ansible-logstash` | Where native libraries from jars are unpacked and trusted |
 
 The helper is written and trusted before any pipeline is validated. The plugin directory holds
 thousands of files, so refreshing entries after a plugin change takes a while; a fapolicyd rule for

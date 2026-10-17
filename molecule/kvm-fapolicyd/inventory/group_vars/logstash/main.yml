@@ -20,7 +20,7 @@ logstash_pipelines:
       input { http { port => 8080 } }
       filter {
       {% if test_use_plugin | bool %}
-        tld { source => "[url][domain]" }
+        tld { source => "[site]" }
       {% endif %}
       }
       output { file { path => "{{ test_output_file }}" codec => json_lines } }
