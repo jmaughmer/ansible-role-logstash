@@ -1,6 +1,21 @@
 ---
-- name: Prepare the VM as in the kvm scenario
-  ansible.builtin.import_playbook: ../kvm/prepare.yml
+# Not ../kvm/prepare.yml: that one also sets up the default scenario's two
+# hosts, TLS files and firewalls, which this scenario does not use.
+- name: Wait for cloud-init
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Wait for cloud-init to finish
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    # The role needs the openssl CLI (see the README's requirements)
+    - name: Install openssl
+      ansible.builtin.dnf:
+        name: openssl
+        state: present
 
 # Ansible's own module files are not trusted either, so its Python is allowed
 # to open anything first (see the README's fapolicyd section). Logstash gets
