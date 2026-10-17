@@ -351,9 +351,14 @@ them on every run as well. Only the plugins listed in `logstash_plugins` are upd
 bundled with Logstash, which Elastic ships at versions tested with that release. An update that
 changes anything restarts Logstash through the rolling restart, so the new code is loaded.
 
-The role tells whether an update changed anything from Bundler's `Gemfile.lock`, not from
-`logstash-plugin`'s own report, which fapolicyd can make wrong (see
-[fapolicyd](#fapolicyd)). To pin a plugin back to an older release, give its `version`.
+The role tells whether an update changed anything from Bundler's `Gemfile.lock`, which also
+catches dependencies and bundled plugins the update moved. To pin a plugin back to an older
+release, give its `version`.
+
+`logstash-plugin` runs with a heap of `logstash_plugin_heap_size` (`1g`) rather than the one in
+`jvm.options`: an update needs more than 512 MB to resolve. If it dies anyway (out of memory,
+killed), the role puts back the `Gemfile` and `Gemfile.lock` it had before. Otherwise the two
+would disagree and every later `logstash-plugin` command would fail.
 
 ## Slow and unreliable networks
 
@@ -477,16 +482,13 @@ that directory is the lighter alternative, in which case set `logstash_fapolicyd
 helper alone. A rolling upgrade rewrites the entries too, on each host after the new package is installed and its
 plugins are updated, and before Logstash starts again.
 
-**Plugin installs and updates.** fapolicyd trusts files by path, size and checksum, so a plugin
-update puts files fapolicyd has never seen into new gem directories. What that means, and what the
-role does about it:
+**Plugin installs and updates.** `logstash-plugin` runs as root, and fapolicyd's default rules let
+trusted programs run by root open anything, so installs and updates themselves are not blocked.
+But fapolicyd trusts files by path, size and checksum, and an update puts files it has never seen
+into new gem directories, which the `logstash` user cannot load. What the role does about it:
 
-- Logstash would refuse to load the new release. The role rewrites the entries after any install,
-  update or removal, before it validates pipelines or restarts Logstash. Logstash keeps running the
-  old release until the rolling restart.
-- `logstash-plugin update` reads back the gem specifications it has just written, and fapolicyd
-  denies that, so the command can report "No plugin updated" when it did update. The role compares
-  `Gemfile.lock` before and after instead.
+- It rewrites the entries after any install, update or removal, before it validates pipelines or
+  restarts Logstash. Logstash keeps running the old release until the rolling restart.
 - A run that stops between the update and the rewrite, or a change made by hand with
   `logstash-plugin` or the package manager, leaves entries that no longer match. The role rewrites
   them on the next run when a directory under `logstash_home` has changed since the trust file was

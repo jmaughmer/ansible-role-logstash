@@ -96,6 +96,12 @@ _ls_fapolicyd_paths: >-
   {{ logstash_fapolicyd_trust_paths if (logstash_fapolicyd_trust_paths | length) > 0
      else (([_ls_validate_script] if logstash_pipeline_validate | bool else [])
            + ([logstash_home ~ '/vendor/bundle'] if (logstash_plugins | length) > 0 else [])) }}
+# logstash-plugin reads jvm.options, and LS_JAVA_OPTS comes after it. No heap
+# dump: one would land in the Ansible user's working directory.
+_ls_plugin_env: >-
+  {{ {'LS_JAVA_OPTS': '-Xms' ~ logstash_plugin_heap_size ~ ' -Xmx' ~ logstash_plugin_heap_size
+                      ~ ' -XX:-HeapDumpOnOutOfMemoryError'}
+     | combine(logstash_plugin_install_env) }}
 _ls_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ logstash_fapolicyd_trust_file }}"
 # What the entries were written for, so a role change that trusts more gets
 # them rewritten. fapolicyd reads nothing else in /etc/fapolicyd.
