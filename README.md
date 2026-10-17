@@ -1,6 +1,6 @@
 # ansible-role-logstash
 
-An Ansible role that installs and configures Logstash 9.x on RHEL, AlmaLinux and Rocky Linux 9 and 10.
+An Ansible role that installs and configures Logstash 9.x on RHEL, AlmaLinux and Rocky Linux 9 and 10, and on Ubuntu 24.04 and 26.04.
 
 What it does:
 
@@ -15,24 +15,26 @@ What it does:
 
 ## Requirements
 
-- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` collection:
+- **Control node:** ansible-core 2.15 or later, plus the `ansible.posix` and `community.general` collections:
 
   ```bash
   ansible-galaxy collection install -r requirements.yml
   ```
 
-- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or a Red Hat Satellite or Katello server. See [Package source](#package-source).
+- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
 - **Plugins:** hosts that install plugins from rubygems need access to it, or a proxy (`logstash_plugin_install_env`), or offline plugin packs.
 
 ## Supported platforms
 
-| Distribution | `ansible_facts['distribution']` | Major versions |
+| Distribution | `ansible_facts['distribution']` | Versions |
 |---|---|---|
 | Red Hat Enterprise Linux | `RedHat` | 9, 10 |
 | AlmaLinux | `AlmaLinux` | 9, 10 |
 | Rocky Linux | `Rocky` | 9, 10 |
+| Ubuntu | `Ubuntu` | 24.04, 26.04 |
 
-- **Same tasks everywhere.** The role has no distribution-specific tasks, and Logstash comes from Elastic's RPM packages on all of them.
+- **Package managers.** Logstash comes from Elastic's RPM packages through dnf on Enterprise Linux, and from Elastic's Debian packages through apt on Ubuntu. Everything else runs the same tasks on both.
+- **Ubuntu differences.** The firewall is ufw instead of firewalld (see [Firewall](#firewall)). SELinux and fapolicyd are normally absent, so their `auto` settings do nothing. Satellite is Enterprise Linux only.
 - **Other distributions.** Preflight stops the run on any other distribution or major version. To try another Enterprise Linux 9 or 10 rebuild, such as CentOS Stream (`CentOS`) or Oracle Linux (`OracleLinux`), add its distribution fact to `logstash_supported_distributions`. Those aren't tested.
 - **Satellite or Katello.** `logstash_repo_source: satellite` needs `subscription-manager` and a host registered to the server. RHEL hosts can use Red Hat Satellite or Katello. AlmaLinux and Rocky Linux hosts are normally registered to Katello; check your Satellite version's supported host operating systems before using it for them.
 - **Elastic's support.** See [Elastic's support matrix](https://www.elastic.co/support/matrix) for the operating systems Elastic supports for your Logstash release.
@@ -51,6 +53,8 @@ roles:
 collections:
   - name: ansible.posix
     version: ">=1.5.0"
+  - name: community.general
+    version: ">=8.0.0"
 ```
 
 ```bash
@@ -63,9 +67,11 @@ ansible-galaxy install -r requirements.yml
 
 | Value | Package source |
 |---|---|
-| `elastic` (default) | Elastic's public repository, or a mirror set with `logstash_repo_baseurl` and `logstash_repo_gpgkey`. The role writes a disabled repository file and enables it only for its own dnf tasks, so a routine `dnf update` never upgrades Logstash. |
-| `satellite` | A repository synced into Red Hat Satellite or Katello, delivered to registered hosts through subscription-manager. See [Red Hat Satellite or Katello](#red-hat-satellite-or-katello). |
+| `elastic` (default) | Elastic's public repository, or a mirror set with `logstash_repo_baseurl` and `logstash_repo_gpgkey`. On Enterprise Linux the role writes a disabled repository file and enables it only for its own dnf tasks, so a routine `dnf update` never upgrades Logstash. On Ubuntu it saves the key to `/etc/apt/keyrings/elastic.asc`, adds `/etc/apt/sources.list.d/elastic-9.x.sources` (suite `stable`, component `main`) and holds the package, so a routine `apt upgrade` never upgrades it. The default `logstash_repo_baseurl` is the yum or apt repository to match the host. |
+| `satellite` | Enterprise Linux only. A repository synced into Red Hat Satellite or Katello, delivered to registered hosts through subscription-manager. See [Red Hat Satellite or Katello](#red-hat-satellite-or-katello). |
 | `none` | Repositories you manage yourself. The role installs from whatever is enabled on the host. |
+
+**Ubuntu and other Elastic roles.** The elasticsearch, kibana and elastic_fleet roles write the same key file and apt source, so a host running more than one of them keeps a single definition. apt refuses two sources for one URL with different keys, so remove any Elastic source added by hand (for example `elastic-9.x.list` from Elastic's install guide) first. To upgrade Logstash outside the role, `apt-mark unhold logstash` first.
 
 **Version check.** Before installing or upgrading, the role checks that `logstash_version` is available from the package source, so a missing version fails before anything changes. You can turn this off with `logstash_package_version_check`.
 
@@ -236,7 +242,7 @@ Tuning notes:
 
 - `logstash.yml`
 - JVM options
-- the systemd drop-in or `/etc/sysconfig/logstash`
+- the systemd drop-in or `/etc/sysconfig/logstash` (`/etc/default/logstash` on Ubuntu)
 - keystore entries
 - plugins
 - TLS files
@@ -264,7 +270,7 @@ logstash_keystore_entries:
 ```
 
 - **Detecting changes.** `logstash-keystore` can't display stored values. The role instead keeps a salted SHA-256 of each managed value in `/etc/logstash/.ansible-keystore-state.json` (root-only, mode `0600`), and replaces an entry only when its value changes.
-- **Password.** The keystore password is written to `/etc/sysconfig/logstash` as `LOGSTASH_KEYSTORE_PASS`. Set it before the keystore is first created; changing the password of an existing keystore isn't automated.
+- **Password.** The keystore password is written to `/etc/sysconfig/logstash` (`/etc/default/logstash` on Ubuntu) as `LOGSTASH_KEYSTORE_PASS`. Set it before the keystore is first created; changing the password of an existing keystore isn't automated.
 - **API password.** Setting `logstash_api_auth_basic_username` enables basic auth on the Logstash API. The password is stored in the keystore as `LOGSTASH_API_PASSWORD`.
 
 ## TLS: `ssl_certificates`
@@ -385,14 +391,15 @@ logstash_firewall_services: [syslog]      # or named firewalld services
 | Variable | Default | |
 |---|---|---|
 | `logstash_manage_firewall` | `true` | Set to `false` to manage the firewall yourself |
-| `logstash_firewall_zone` | `public` | Zone the rules go in |
+| `logstash_firewall_zone` | `public` | firewalld zone the rules go in |
 | `logstash_firewall_ports` | `[]` | Ports the configured inputs listen on |
-| `logstash_firewall_services` | `[]` | Named firewalld services |
+| `logstash_firewall_services` | `[]` | Named firewalld services (firewalld only; list their ports for ufw) |
 
-Rules are added permanently and immediately. Preflight rejects entries that are not `port/proto` or
+Rules go into firewalld, or into ufw on a host running ufw instead (Ubuntu). The role never starts
+or enables a firewall. firewalld rules are added permanently and immediately. Preflight rejects entries that are not `port/proto` or
 `range/proto`, so a typo fails the run instead of quietly leaving an input unreachable. The API port
-is deliberately not opened: it binds to localhost. If firewalld is not running the role reports the
-ports that still have to be reachable.
+is deliberately not opened: it binds to localhost. If neither firewalld nor ufw is active the role
+reports the ports that still have to be reachable.
 
 **Ports below 1024.** Logstash runs as the `logstash` user, which cannot bind privileged ports such
 as syslog's 514. Grant the capability through the systemd drop-in:
@@ -562,13 +569,18 @@ KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforc
 as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 `molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
 
+[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
+[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
+VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
+
 ```bash
-molecule test -s kvm
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. The AlmaLinux 10 cloud image downloads once, checksum
-verified, to `/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it.
+must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
+`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
+scenario, so the three scenarios can also run side by side if the machine has the memory.
 
 ## Role layout
 

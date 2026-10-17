@@ -8,10 +8,15 @@
   delay: "{{ logstash_task_delay }}"
   when: ansible_facts['mounts'] is not defined or ansible_facts['memtotal_mb'] is not defined
 
+# dpkg-query prints the selection and state too: '<want> ok installed <version>'
+# for an installed package, 'deinstall ok config-files <version>' once removed.
+# The Debian package's version carries an epoch and a revision (1:9.5.4-1).
 - name: Facts | Query installed Logstash package version
   ansible.builtin.command:
-    cmd: rpm -q --queryformat '%{VERSION}' logstash
-  register: _ls_rpm_query
+    cmd: >-
+      {{ "dpkg-query -W -f='${Status} ${Version}' logstash" if ansible_facts['os_family'] == 'Debian'
+         else "rpm -q --queryformat '%{VERSION}' logstash" }}
+  register: _ls_pkg_query
   changed_when: false
   failed_when: false
   check_mode: false
@@ -26,7 +31,13 @@
 
 - name: Facts | Set Logstash facts
   ansible.builtin.set_fact:
-    _ls_installed_version: "{{ (_ls_rpm_query.stdout | trim) if _ls_rpm_query.rc == 0 else '' }}"
+    _ls_pkg_mgr: "{{ 'apt' if ansible_facts['os_family'] == 'Debian' else 'dnf' }}"
+    _ls_installed_version: >-
+      {{ '' if _ls_pkg_query.rc != 0
+         else (_ls_pkg_query.stdout | trim) if ansible_facts['os_family'] != 'Debian'
+         else (_ls_pkg_query.stdout.split() | last | regex_replace('^[0-9]+:', '') | regex_replace('-[^-]*$', ''))
+              if ' ok installed ' in _ls_pkg_query.stdout
+         else '' }}
     _ls_is_running: "{{ (_ls_service_state.stdout | trim) == 'active' }}"
     _ls_target_version: "{{ logstash_version }}"
     _ls_plugins_raw: "{{ logstash_plugins }}"

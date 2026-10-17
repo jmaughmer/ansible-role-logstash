@@ -1,6 +1,15 @@
 ---
 # Written before the fapolicyd trust entries are refreshed, because on a host
 # running fapolicyd the helper has to be trusted before pipelines.yml runs it.
+# Ubuntu has no /usr/local/libexec until something creates it.
+- name: Pipelines | Create the helper directory
+  ansible.builtin.file:
+    path: "{{ _ls_validate_script | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
 - name: Pipelines | Install pipeline validation helper
   ansible.builtin.template:
     src: validate-pipeline.sh.j2
