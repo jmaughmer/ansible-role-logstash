@@ -449,18 +449,27 @@ Satellite mode. Denials are audited, so `ausearch -m fanotify -ts recent` shows 
 pipeline validation helper this role writes to `/usr/local/libexec`. Without trust entries fapolicyd
 blocks both — the helper visibly, since `logstash_pipeline_validate` then fails on every run.
 
-**What rpm installed but fapolicyd does not trust:** the shared libraries in the Logstash package,
-such as the bundled JDK's `libjli.so`. The default `/etc/fapolicyd/fapolicyd-filter.conf` leaves
-`usr/share/` out of the rpm trust apart from scripts and archives, so without an entry for them
-Java fails to start as the `logstash` user (`error while loading shared libraries: libjli.so`).
-Root is not affected, which is why `logstash-plugin` still works. The role trusts every `*.so` file
-under `logstash_home` that the paths below do not already cover.
+**What rpm installed but fapolicyd does not trust.** The default
+`/etc/fapolicyd/fapolicyd-filter.conf` leaves `usr/share/` out of the rpm trust apart from scripts
+and archives. Root is not affected, which is why `logstash-plugin` still works, but as the
+`logstash` user:
+
+- Java fails to start, because the bundled JDK's `libjli.so` and the other shared libraries are not
+  trusted (`error while loading shared libraries: libjli.so`). The JDK's `jspawnhelper`, which starts
+  child processes, is refused too. The role trusts every `*.so` file, `jspawnhelper` and `jexec`
+  under `logstash_home` that the paths below do not already cover.
+- JRuby's FFI library, which Logstash needs at startup, lives inside `jruby.jar`. JRuby unpacks it
+  to a new temporary file on every start, which nothing can trust in advance, so Logstash stops with
+  `Could not load FFI Provider`. The role unpacks it once to `logstash_fapolicyd_jffi_dir`
+  (`/usr/local/lib/ansible-logstash`), trusts it there, and adds `-Djffi.boot.library.path` to
+  `jvm.options` so JRuby loads that copy.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `logstash_fapolicyd_trust` | `auto` | `auto` acts only when fapolicyd is running; `true` always; `false` never |
 | `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust, besides the shared libraries |
 | `logstash_fapolicyd_trust_file` | `ansible-logstash` | File under `/etc/fapolicyd/trust.d/` |
+| `logstash_fapolicyd_jffi_dir` | `/usr/local/lib/ansible-logstash` | Where JRuby's FFI library is unpacked and trusted |
 
 The helper is written and trusted before any pipeline is validated. The plugin directory holds
 thousands of files, so refreshing entries after a plugin change takes a while; a fapolicyd rule for
@@ -481,7 +490,8 @@ role does about it:
 - A run that stops between the update and the rewrite, or a change made by hand with
   `logstash-plugin` or the package manager, leaves entries that no longer match. The role rewrites
   them on the next run when a directory under `logstash_home` has changed since the trust file was
-  written.
+  written. They are also rewritten when the role would trust different paths than last time, which
+  it records next to the trust file in `/etc/fapolicyd/ansible-logstash.ansible.json`.
 - The denials are audited, so `ausearch -m fanotify -ts recent` shows them while the entries are
   out of date.
 

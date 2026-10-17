@@ -289,6 +289,9 @@ logstash_fapolicyd_trust_paths: []
 logstash_fapolicyd_trust_file: ansible-logstash
 # Rewrite the entries even when nothing changed
 logstash_fapolicyd_force_trust: false
+# Where JRuby's FFI library is unpacked to and trusted. jvm.options gets
+# -Djffi.boot.library.path pointing here.
+logstash_fapolicyd_jffi_dir: /usr/local/lib/ansible-logstash
 
 # =============================================================================
 # Network resilience (high-latency / low-bandwidth links)

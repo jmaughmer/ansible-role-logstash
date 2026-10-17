@@ -8,19 +8,73 @@
 #                        _ls_fapolicyd_trust fact gives the paths, the trust
 #                        file and the Logstash home
 
+- name: "fapolicyd | Create the FFI library directory on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.file:
+    path: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+
+# Python, because the hosts have no unzip for ansible.builtin.unarchive. The
+# library is rewritten only when the package's copy differs, and copies from
+# other jffi versions are removed.
+- name: "fapolicyd | Unpack JRuby's FFI library on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - "{{ _ls_jffi_script }}"
+      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.home }}/vendor/jruby/lib/jruby.jar"
+      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_platform }}"
+      - "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir }}"
+  vars:
+    _ls_jffi_script: |
+      import os, re, sys, zipfile
+      jar, platform, dest = sys.argv[1:]
+      pattern = re.compile(r"jni/%s/libjffi-[0-9.]+[.]so" % re.escape(platform))
+      with zipfile.ZipFile(jar) as z:
+          names = [n for n in z.namelist() if pattern.fullmatch(n)]
+          if len(names) != 1:
+              sys.exit("expected one jffi library for %s in %s, found %s" % (platform, jar, names))
+          data = z.read(names[0])
+      name = os.path.basename(names[0])
+      path = os.path.join(dest, name)
+      stale = [f for f in os.listdir(dest) if f.startswith("libjffi-") and f != name]
+      for f in stale:
+          os.remove(os.path.join(dest, f))
+      try:
+          with open(path, "rb") as f:
+              same = f.read() == data
+      except FileNotFoundError:
+          same = False
+      if not same:
+          with open(path + ".tmp", "wb") as f:
+              f.write(data)
+          os.chmod(path + ".tmp", 0o644)
+          os.replace(path + ".tmp", path)
+      if stale or not same:
+          print("changed")
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  register: _ls_jffi_unpacked
+  changed_when: "'changed' in _ls_jffi_unpacked.stdout"
+
 - name: "fapolicyd | Check which paths exist on {{ _ls_fapolicyd_host }}"
   ansible.builtin.stat:
     path: "{{ item }}"
-  loop: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.paths }}"
+  loop: >-
+    {{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.paths
+       + [hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.jffi_dir] }}
   delegate_to: "{{ _ls_fapolicyd_host }}"
   register: _ls_fapolicyd_path_stat
 
-# Shared libraries already under a trusted directory are left out, because
-# fapolicyd-cli refuses to add a file twice.
-- name: "fapolicyd | Find the shared libraries Logstash ships on {{ _ls_fapolicyd_host }}"
+# Files already under a trusted directory are left out, because fapolicyd-cli
+# refuses to add a file twice.
+- name: "fapolicyd | Find the package files rpm trust leaves out on {{ _ls_fapolicyd_host }}"
   ansible.builtin.find:
     paths: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.home }}"
-    patterns: ["*.so", "*.so.*"]
+    patterns: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.patterns }}"
     recurse: true
   delegate_to: "{{ _ls_fapolicyd_host }}"
   register: _ls_fapolicyd_libs
@@ -50,7 +104,7 @@
 
 # One task for all of them: there are dozens, and a task each would cost a
 # round trip each on a slow link.
-- name: "fapolicyd | Trust the shared libraries on {{ _ls_fapolicyd_host }}"
+- name: "fapolicyd | Trust the package files rpm trust leaves out on {{ _ls_fapolicyd_host }}"
   ansible.builtin.command:
     argv: >-
       {{ ['/bin/bash', '-c', _ls_fapolicyd_libs_script, 'fapolicyd-trust-libs',
@@ -79,3 +133,12 @@
   delegate_to: "{{ _ls_fapolicyd_host }}"
   changed_when: true
   when: _ls_fapolicyd_added is changed or _ls_fapolicyd_libs_added is changed
+
+- name: "fapolicyd | Record what the entries were written for on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.copy:
+    dest: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.state }}"
+    content: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.spec | to_json }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  delegate_to: "{{ _ls_fapolicyd_host }}"

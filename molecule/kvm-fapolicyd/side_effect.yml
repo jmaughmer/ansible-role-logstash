@@ -3,7 +3,8 @@
 # whether the fapolicyd trust entries were rewritten, from the trust file's
 # modification time:
 #   - unpinning the plugin with logstash_plugins_update updates it, and the
-#     entries are rewritten before Logstash restarts;
+#     entries are rewritten before the pipeline that now uses it is validated
+#     and Logstash restarts;
 #   - the same run again updates nothing and leaves the entries alone;
 #   - a plugin change made outside the role, which updates the gem
 #     directory's modification time, gets the entries rewritten.
@@ -15,6 +16,7 @@
     logstash_plugins:
       - name: "{{ test_plugin }}"
     logstash_plugins_update: true
+    test_use_plugin: true
   tasks:
     - name: Read the trust file
       ansible.builtin.stat:

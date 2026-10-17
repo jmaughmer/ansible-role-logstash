@@ -1,10 +1,13 @@
 ---
 # logstash-filter-tld is not bundled with Logstash, so the role installs it
 # with logstash-plugin and fapolicyd knows nothing about its files. Converge
-# pins an old release; side_effect.yml unpins it and updates it.
+# pins an old release; side_effect.yml unpins it, updates it and starts using
+# it. The old release cannot run on Logstash 9 (its public_suffix 3 fails on
+# Ruby 3.4), so only the updated one goes in the pipeline.
 test_plugin: logstash-filter-tld
 test_plugin_old_version: 3.1.2
 test_output_file: /var/lib/logstash/molecule-tld.log
+test_use_plugin: false
 
 logstash_plugins:
   - name: "{{ test_plugin }}"
@@ -15,7 +18,11 @@ logstash_pipelines:
     workers: 1
     config: |
       input { http { port => 8080 } }
-      filter { tld { source => "[url][domain]" } }
+      filter {
+      {% if test_use_plugin | bool %}
+        tld { source => "[url][domain]" }
+      {% endif %}
+      }
       output { file { path => "{{ test_output_file }}" codec => json_lines } }
 
 logstash_heap_size: 512m
