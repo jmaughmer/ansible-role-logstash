@@ -214,6 +214,9 @@ logstash_ssl_dir: /etc/logstash/certs
 logstash_plugins: []
 # Environment for logstash-plugin, e.g. { HTTPS_PROXY: "http://proxy:3128" }
 logstash_plugin_install_env: {}
+# Update the unpinned plugins above (no version or source) to their latest
+# release on every run. They are always updated after a Logstash upgrade.
+logstash_plugins_update: false
 
 # =============================================================================
 # Operating system / systemd

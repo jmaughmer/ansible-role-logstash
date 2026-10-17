@@ -1,0 +1,96 @@
+---
+# Runs after the idempotence check. Each step applies the role and checks
+# whether the fapolicyd trust entries were rewritten, from the trust file's
+# modification time:
+#   - unpinning the plugin with logstash_plugins_update updates it, and the
+#     entries are rewritten before Logstash restarts;
+#   - the same run again updates nothing and leaves the entries alone;
+#   - a plugin change made outside the role, which updates the gem
+#     directory's modification time, gets the entries rewritten.
+- name: Update the plugin
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars: &test_update_vars
+    logstash_plugins:
+      - name: "{{ test_plugin }}"
+    logstash_plugins_update: true
+  tasks:
+    - name: Read the trust file
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_before
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Read the trust file again
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_after
+
+    - name: Check the entries were rewritten
+      ansible.builtin.assert:
+        that:
+          - test_trust_after.stat.mtime > test_trust_before.stat.mtime
+
+    # For the record: what logstash-plugin itself reported under fapolicyd
+    - name: Show the update's output
+      ansible.builtin.debug:
+        var: _ls_plugin_updated.stdout_lines
+
+- name: Update again with nothing new
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars: *test_update_vars
+  tasks:
+    - name: Read the trust file
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_before
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Read the trust file again
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_after
+
+    - name: Check the entries were left alone
+      ansible.builtin.assert:
+        that:
+          - test_trust_after.stat.mtime == test_trust_before.stat.mtime
+
+- name: Change the plugins outside the role
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars: *test_update_vars
+  tasks:
+    - name: Read the trust file
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_before
+
+    # What adding or removing a gem does to its parent directory
+    - name: Touch the gem directory
+      ansible.builtin.shell: touch /usr/share/logstash/vendor/bundle/jruby/*/gems
+      changed_when: true
+
+    - name: Apply the role
+      ansible.builtin.include_role:
+        name: "{{ lookup('env', 'MOLECULE_PROJECT_DIRECTORY') }}"
+
+    - name: Read the trust file again
+      ansible.builtin.stat:
+        path: /etc/fapolicyd/trust.d/ansible-logstash
+      register: test_trust_after
+
+    - name: Check the entries were rewritten
+      ansible.builtin.assert:
+        that:
+          - test_trust_after.stat.mtime > test_trust_before.stat.mtime

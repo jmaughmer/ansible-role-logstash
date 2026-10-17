@@ -3,6 +3,7 @@
 # Inputs:
 #   _ls_plugin_host           host to act on (tasks are delegated to it)
 #   _ls_plugin_after_upgrade  also update unpinned plugins to match the new Logstash
+#                             (logstash_plugins_update does so on every run)
 # Output:
 #   _ls_plugins_changed
 
@@ -92,26 +93,54 @@
   delay: "{{ logstash_task_delay }}"
   changed_when: true
 
-- name: "Plugins | Update unpinned plugins after upgrade on {{ _ls_plugin_host }}"
-  ansible.builtin.command:
-    argv: "{{ [logstash_home ~ '/bin/logstash-plugin', 'update'] + _ls_plugin_unpinned }}"
-  vars:
+- name: "Plugins | Select plugins to update on {{ _ls_plugin_host }}"
+  ansible.builtin.set_fact:
+    # plain names and dicts without a version or source, that are installed
     _ls_plugin_unpinned: >-
       {{ ((hostvars[_ls_plugin_host]._ls_plugins_raw | select('string') | list)
           + (_ls_plugin_present_dicts | rejectattr('version', 'defined') | rejectattr('source', 'defined')
              | map(attribute='name') | list)) | select('in', _ls_plugin_installed) | list }}
-  environment: "{{ logstash_plugin_install_env }}"
-  delegate_to: "{{ _ls_plugin_host }}"
-  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
-  poll: "{{ logstash_download_async_poll }}"
-  register: _ls_plugin_updated
-  until: _ls_plugin_updated is not failed
-  retries: "{{ logstash_task_retries }}"
-  delay: "{{ logstash_task_delay }}"
-  changed_when: "'Updated' in (_ls_plugin_updated.stdout | default(''))"
+
+- name: "Plugins | Update unpinned plugins on {{ _ls_plugin_host }}"
   when:
-    - _ls_plugin_after_upgrade | bool
+    - (_ls_plugin_after_upgrade | bool) or (logstash_plugins_update | bool)
     - _ls_plugin_unpinned | length > 0
+  block:
+    - name: "Plugins | Read the plugin lock file on {{ _ls_plugin_host }}"
+      ansible.builtin.stat:
+        path: "{{ logstash_home }}/Gemfile.lock"
+      delegate_to: "{{ _ls_plugin_host }}"
+      register: _ls_plugin_lock
+
+    # Bundler's lock file changes exactly when installed versions do, so the
+    # wrapper compares it with the checksum taken before the first attempt,
+    # which a retry does not reset. The update command's own report is not
+    # used: it re-reads the gem specifications it has just written, which
+    # fapolicyd refuses to open until they are trusted.
+    - name: "Plugins | Update unpinned plugins on {{ _ls_plugin_host }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/bin/bash', '-c', _ls_plugin_update_script, 'logstash-plugin-update',
+              logstash_home ~ '/Gemfile.lock', _ls_plugin_lock.stat.checksum | default(''),
+              logstash_home ~ '/bin/logstash-plugin', 'update'] + _ls_plugin_unpinned }}
+      vars:
+        _ls_plugin_update_script: |
+          set -o pipefail
+          lock=$1 before=$2; shift 2
+          "$@" || exit
+          after=$(sha1sum "$lock" | cut -d ' ' -f 1)
+          if [ "$after" != "$before" ]; then
+            echo "ansible: installed plugin versions changed"
+          fi
+      environment: "{{ logstash_plugin_install_env }}"
+      delegate_to: "{{ _ls_plugin_host }}"
+      async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+      poll: "{{ logstash_download_async_poll }}"
+      register: _ls_plugin_updated
+      until: _ls_plugin_updated is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: "'ansible: installed plugin versions changed' in (_ls_plugin_updated.stdout | default(''))"
 
 - name: "Plugins | Record plugin changes for {{ _ls_plugin_host }}"
   ansible.builtin.set_fact:

@@ -143,6 +143,13 @@
   loop_control:
     label: "{{ item.name | default(item) }}"
 
+- name: Preflight | Verify the plugin update setting
+  ansible.builtin.assert:
+    that:
+      - logstash_plugins_update is boolean
+    fail_msg: logstash_plugins_update must be true or false.
+    quiet: true
+
 - name: Preflight | Verify TLS certificate entries
   ansible.builtin.assert:
     that:

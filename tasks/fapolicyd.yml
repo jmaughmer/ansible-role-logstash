@@ -44,6 +44,30 @@
         path: "{{ _ls_fapolicyd_trust_file }}"
       register: _ls_fapolicyd_file
 
+    # logstash-plugin adds and removes gem directories, which updates their
+    # parents' modification times. One newer than the trust file means the
+    # plugins changed after the entries were written: by hand, or in a run
+    # that stopped before it refreshed them.
+    - name: fapolicyd | Look for plugin changes made since the entries were written
+      ansible.builtin.command:
+        argv:
+          - find
+          - "{{ logstash_home }}/vendor/bundle"
+          - -maxdepth
+          - "3"
+          - -type
+          - d
+          - -newer
+          - "{{ _ls_fapolicyd_trust_file }}"
+          - -print
+          - -quit
+      register: _ls_fapolicyd_stale
+      changed_when: false
+      check_mode: false
+      when:
+        - _ls_fapolicyd_file.stat.exists
+        - (logstash_home ~ '/vendor/bundle') in _ls_fapolicyd_paths
+
     # The entries hold a size and a checksum per file, so they are rewritten
     # whenever the files they cover have changed.
     - name: fapolicyd | Refresh the trust entries
@@ -56,5 +80,6 @@
       when: >-
         (not _ls_fapolicyd_file.stat.exists)
         or (_ls_plugins_changed | default(false) | bool)
+        or (_ls_fapolicyd_stale.stdout | default('') | length > 0)
         or (_ls_validate_helper is defined and _ls_validate_helper is changed)
         or (logstash_fapolicyd_force_trust | bool)

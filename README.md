@@ -343,7 +343,17 @@ logstash_plugins:
     state: absent
 ```
 
-Set `logstash_plugin_install_env` for a proxy, for example `HTTPS_PROXY`. After an upgrade, unpinned plugins are updated with `logstash-plugin update`.
+Set `logstash_plugin_install_env` for a proxy, for example `HTTPS_PROXY`.
+
+**Updates.** Unpinned plugins, those without a `version` or `source`, are updated with
+`logstash-plugin update` after every Logstash upgrade. Set `logstash_plugins_update: true` to update
+them on every run as well. Only the plugins listed in `logstash_plugins` are updated, never the ones
+bundled with Logstash, which Elastic ships at versions tested with that release. An update that
+changes anything restarts Logstash through the rolling restart, so the new code is loaded.
+
+The role tells whether an update changed anything from Bundler's `Gemfile.lock`, not from
+`logstash-plugin`'s own report, which fapolicyd can make wrong (see
+[fapolicyd](#fapolicyd)). To pin a plugin back to an older release, give its `version`.
 
 ## Slow and unreliable networks
 
@@ -450,6 +460,22 @@ thousands of files, so refreshing entries after a plugin change takes a while; a
 that directory is the lighter alternative, in which case set `logstash_fapolicyd_trust_paths` to the
 helper alone. A rolling upgrade rewrites the entries too, on each host after its plugins are updated
 and before Logstash starts again.
+
+**Plugin installs and updates.** fapolicyd trusts files by path, size and checksum, so a plugin
+update puts files fapolicyd has never seen into new gem directories. What that means, and what the
+role does about it:
+
+- Logstash would refuse to load the new release. The role rewrites the entries after any install,
+  update or removal, before it validates pipelines or restarts Logstash. Logstash keeps running the
+  old release until the rolling restart.
+- `logstash-plugin update` reads back the gem specifications it has just written, and fapolicyd
+  denies that, so the command can report "No plugin updated" when it did update. The role compares
+  `Gemfile.lock` before and after instead.
+- A run that stops between the update and the rewrite, or a plugin change made by hand with
+  `logstash-plugin`, leaves entries that no longer match. The role rewrites them on the next run
+  when the plugin directory has changed since the trust file was written.
+- The denials are audited, so `ausearch -m fanotify -ts recent` shows them while the entries are
+  out of date.
 
 The entries go in a file of their own under `/etc/fapolicyd/trust.d/`, which needs fapolicyd 1.1 or
 newer (RHEL 9 and 10 both ship that). Set `logstash_fapolicyd_trust: false` on anything older and manage
@@ -559,7 +585,7 @@ Not covered by containers:
 - SELinux file contexts and fapolicyd trust entries, which need virtual machines with SELinux enforcing and fapolicyd running;
 - FIPS mode;
 - Red Hat Satellite repositories;
-- plugin installs and updates, which download from rubygems.org.
+- plugin installs and updates, which download from rubygems.org (see `kvm-fapolicyd` below).
 
 ### On KVM virtual machines
 
@@ -573,8 +599,13 @@ as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 [`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
 VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
 
+[`molecule/kvm-fapolicyd/`](molecule/kvm-fapolicyd/) runs one AlmaLinux 10 VM with fapolicyd
+running. It installs an old release of `logstash-filter-tld`, updates it with
+`logstash_plugins_update`, and checks that Logstash runs the new release with nothing denied and that
+the trust entries are rewritten only when the plugins changed. It downloads from rubygems.org.
+
 ```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
