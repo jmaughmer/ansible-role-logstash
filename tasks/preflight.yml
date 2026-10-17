@@ -4,13 +4,15 @@
     that:
       - logstash_supported_distributions is sequence
       - logstash_supported_distributions is not string
-      - ansible_facts['os_family'] == 'RedHat'
       - ansible_facts['distribution'] in logstash_supported_distributions
-      - ansible_facts['distribution_major_version'] in ['9', '10']
+      - >-
+        (ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution_major_version'] in ['9', '10'])
+        or (ansible_facts['distribution'] == 'Ubuntu' and ansible_facts['distribution_version'] in ['24.04', '26.04'])
     fail_msg: >-
       Unsupported platform {{ ansible_facts['distribution'] }}
-      {{ ansible_facts['distribution_version'] }}. Supported: major version 9 or 10 of
-      {{ logstash_supported_distributions | join(', ') }} (logstash_supported_distributions).
+      {{ ansible_facts['distribution_version'] }}. Supported: Enterprise Linux 9 or 10 and Ubuntu
+      24.04 or 26.04, from {{ logstash_supported_distributions | join(', ') }}
+      (logstash_supported_distributions).
     quiet: true
 
 - name: Preflight | Verify the play is not serialized
@@ -43,9 +45,10 @@
       - logstash_satellite_repo_state in ['unmanaged', 'enabled', 'disabled']
       - logstash_satellite_repo_overrides is mapping
       - logstash_satellite_repo_overrides.keys() | map('lower') | intersect(['enabled', 'baseurl', 'name']) | length == 0
+      - logstash_repo_source != 'satellite' or ansible_facts['os_family'] == 'RedHat'
     fail_msg: >-
       logstash_repo_source must be elastic, satellite or none (logstash_manage_repo was replaced:
-      use logstash_repo_source: none instead of false). Satellite needs logstash_satellite_repo_id;
+      use logstash_repo_source: none instead of false). Satellite is for Enterprise Linux hosts only and needs logstash_satellite_repo_id;
       logstash_satellite_repo_state must be unmanaged, enabled or disabled; and
       logstash_satellite_repo_overrides cannot set enabled (use the state setting), baseurl or name.
     quiet: true

@@ -21,11 +21,12 @@
     daemon_reload: true
   when: _ls_systemd_override is changed
 
-# Read by the packaged unit (EnvironmentFile=-/etc/sysconfig/logstash)
+# Read by the packaged unit (EnvironmentFile=-/etc/sysconfig/logstash, or
+# /etc/default/logstash on Ubuntu)
 - name: System | Configure service environment
   ansible.builtin.template:
     src: sysconfig.j2
-    dest: /etc/sysconfig/logstash
+    dest: "{{ _ls_sysconfig_file }}"
     owner: root
     group: root
     mode: "0600"
@@ -73,13 +74,48 @@
     - logstash_manage_firewall | bool
     - (_ls_firewalld_state.stdout | default('') | trim) == 'active'
 
-- name: System | Report that firewalld is not running
+# Ubuntu's firewall. Rules are only added while ufw is active, as with firewalld.
+- name: System | Check whether ufw is active
+  ansible.builtin.command:
+    cmd: ufw status
+  register: _ls_ufw_state
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - logstash_manage_firewall | bool
+    - (logstash_firewall_ports | length > 0) or (logstash_firewall_services | length > 0)
+    - (_ls_firewalld_state.stdout | default('') | trim) != 'active'
+
+- name: System | Open input ports in ufw
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.split('/') | first | replace('-', ':') }}"
+    proto: "{{ item.split('/') | last }}"
+    comment: logstash
+  loop: "{{ logstash_firewall_ports }}"
+  when:
+    - logstash_manage_firewall | bool
+    - _ls_ufw_active | bool
+
+- name: System | Report firewalld services that ufw cannot open
   ansible.builtin.debug:
     msg: >-
-      logstash_manage_firewall is on but firewalld is not running on {{ inventory_hostname }}, so
-      no rules were added. The input ports {{ logstash_firewall_ports | join(', ') }} have to be
+      logstash_firewall_services ({{ logstash_firewall_services | join(', ') }}) are firewalld service
+      names, which ufw does not know. List their ports in logstash_firewall_ports instead.
+  when:
+    - logstash_manage_firewall | bool
+    - _ls_ufw_active | bool
+    - logstash_firewall_services | length > 0
+
+- name: System | Report that no firewall is running
+  ansible.builtin.debug:
+    msg: >-
+      logstash_manage_firewall is on but neither firewalld nor ufw is running on {{ inventory_hostname }},
+      so no rules were added. The input ports {{ logstash_firewall_ports | join(', ') }} have to be
       reachable however this host filters traffic.
   when:
     - logstash_manage_firewall | bool
     - (logstash_firewall_ports | length > 0) or (logstash_firewall_services | length > 0)
     - (_ls_firewalld_state.stdout | default('') | trim) != 'active'
+    - not (_ls_ufw_active | bool)

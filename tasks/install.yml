@@ -5,9 +5,43 @@
     - logstash_package_version_check | bool
     - _ls_installed_version != logstash_version
 
+# apt needs the package's full version, epoch and revision included
+# (1:9.5.4-1), which only the package index knows.
+- name: Install | Find the Logstash package version in the apt index
+  when:
+    - _ls_pkg_mgr == 'apt'
+    - _ls_installed_version != logstash_version
+  block:
+    - name: Install | Update the apt package index
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+        lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+      register: _ls_apt_cache
+      until: _ls_apt_cache is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: false
+      check_mode: false
+
+    - name: Install | List the Logstash versions in the apt index
+      ansible.builtin.command:
+        argv: [apt-cache, madison, logstash]
+      register: _ls_apt_madison
+      changed_when: false
+      check_mode: false
+
+    - name: Install | Record the apt version of logstash_version
+      ansible.builtin.set_fact:
+        _ls_apt_version: >-
+          {{ _ls_apt_madison.stdout_lines
+             | map('regex_replace', '^[^|]*[|]([^|]*)[|].*$', '\1') | map('trim')
+             | select('match', '^([0-9]+:)?' ~ (logstash_version | regex_escape) ~ '(-[^-]+)?$')
+             | first | default('1:' ~ logstash_version ~ '-1') }}
+
 # Package downloads run as async jobs so a dropped SSH session does not abort
 # them, and are retried if the download itself fails.
-- name: Install | Install Logstash package
+- name: Install | Install Logstash package (dnf)
   ansible.builtin.dnf:
     name: "logstash-{{ logstash_version }}"
     state: present
@@ -19,11 +53,30 @@
   until: _ls_package_install is not failed
   retries: "{{ logstash_task_retries }}"
   delay: "{{ logstash_task_delay }}"
-  when: _ls_installed_version | length == 0
+  when:
+    - _ls_pkg_mgr == 'dnf'
+    - _ls_installed_version | length == 0
+
+- name: Install | Install Logstash package (apt)
+  ansible.builtin.apt:
+    name: "logstash={{ _ls_apt_version }}"
+    state: present
+    allow_change_held_packages: true
+    cache_valid_time: 3600
+    lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_package_install_apt
+  until: _ls_package_install_apt is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  when:
+    - _ls_pkg_mgr == 'apt'
+    - _ls_installed_version | length == 0
 
 # Stopped hosts are upgraded in place; running hosts are upgraded one batch at
 # a time by restart_batch.yml.
-- name: Install | Upgrade Logstash package on a stopped host
+- name: Install | Upgrade Logstash package on a stopped host (dnf)
   ansible.builtin.dnf:
     name: "logstash-{{ logstash_version }}"
     state: present
@@ -37,10 +90,40 @@
   retries: "{{ logstash_task_retries }}"
   delay: "{{ logstash_task_delay }}"
   when:
+    - _ls_pkg_mgr == 'dnf'
     - _ls_version_changing | bool
     - not (_ls_is_running | bool)
 
+- name: Install | Upgrade Logstash package on a stopped host (apt)
+  ansible.builtin.apt:
+    name: "logstash={{ _ls_apt_version }}"
+    state: present
+    allow_change_held_packages: true
+    allow_downgrade: false
+    cache_valid_time: 3600
+    lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+  poll: "{{ logstash_download_async_poll }}"
+  register: _ls_package_upgrade_apt
+  until: _ls_package_upgrade_apt is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  when:
+    - _ls_pkg_mgr == 'apt'
+    - _ls_version_changing | bool
+    - not (_ls_is_running | bool)
+
+# The apt counterpart of the disabled dnf repository: `apt upgrade` skips a held
+# package, so only the role (rolling, one batch at a time) changes the version.
+- name: Install | Hold the Logstash package
+  ansible.builtin.dpkg_selections:
+    name: logstash
+    selection: hold
+  when:
+    - _ls_pkg_mgr == 'apt'
+    - not ansible_check_mode or _ls_installed_version | length > 0
+
 - name: Install | Record package state
   ansible.builtin.set_fact:
-    _ls_upgraded_offline: "{{ _ls_package_upgrade is changed }}"
+    _ls_upgraded_offline: "{{ _ls_package_upgrade is changed or _ls_package_upgrade_apt is changed }}"
     _ls_upgrade_pending: "{{ (_ls_version_changing | bool) and (_ls_is_running | bool) }}"
