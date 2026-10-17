@@ -2,7 +2,10 @@
 # fapolicyd only allows code it trusts, and its trust comes from the rpm
 # database. Neither the plugins logstash-plugin unpacks nor the pipeline
 # validation helper this role writes are installed by rpm, so both have to be
-# trusted explicitly or fapolicyd refuses to run them.
+# trusted explicitly or fapolicyd refuses to run them. Nor are the shared
+# libraries the Logstash package ships, such as the bundled JDK's: the default
+# fapolicyd-filter.conf leaves usr/share/ out of the rpm trust except for
+# scripts and archives, so Java cannot start as the logstash user.
 - name: fapolicyd | Check whether fapolicyd is running
   ansible.builtin.command:
     cmd: systemctl is-active fapolicyd
@@ -18,7 +21,8 @@
 - name: fapolicyd | Record what this host trusts
   ansible.builtin.set_fact:
     _ls_fapolicyd_trust: >-
-      {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file}
+      {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file,
+          'home': logstash_home}
          if _ls_fapolicyd_manage | bool else {} }}
 
 - name: fapolicyd | Manage the trust database
@@ -44,17 +48,18 @@
         path: "{{ _ls_fapolicyd_trust_file }}"
       register: _ls_fapolicyd_file
 
-    # logstash-plugin adds and removes gem directories, which updates their
-    # parents' modification times. One newer than the trust file means the
-    # plugins changed after the entries were written: by hand, or in a run
-    # that stopped before it refreshed them.
-    - name: fapolicyd | Look for plugin changes made since the entries were written
+    # Package upgrades and logstash-plugin add and remove files, which updates
+    # their directories' modification times. One newer than the trust file
+    # means Logstash or its plugins changed after the entries were written: by
+    # hand, or in a run that stopped before it refreshed them. Four levels
+    # reach vendor/bundle/jruby/<version>/gems.
+    - name: fapolicyd | Look for changes made since the entries were written
       ansible.builtin.command:
         argv:
           - find
-          - "{{ logstash_home }}/vendor/bundle"
+          - "{{ logstash_home }}"
           - -maxdepth
-          - "3"
+          - "4"
           - -type
           - d
           - -newer
@@ -64,9 +69,7 @@
       register: _ls_fapolicyd_stale
       changed_when: false
       check_mode: false
-      when:
-        - _ls_fapolicyd_file.stat.exists
-        - (logstash_home ~ '/vendor/bundle') in _ls_fapolicyd_paths
+      when: _ls_fapolicyd_file.stat.exists
 
     # The entries hold a size and a checksum per file, so they are rewritten
     # whenever the files they cover have changed.

@@ -449,17 +449,24 @@ Satellite mode. Denials are audited, so `ausearch -m fanotify -ts recent` shows 
 pipeline validation helper this role writes to `/usr/local/libexec`. Without trust entries fapolicyd
 blocks both — the helper visibly, since `logstash_pipeline_validate` then fails on every run.
 
+**What rpm installed but fapolicyd does not trust:** the shared libraries in the Logstash package,
+such as the bundled JDK's `libjli.so`. The default `/etc/fapolicyd/fapolicyd-filter.conf` leaves
+`usr/share/` out of the rpm trust apart from scripts and archives, so without an entry for them
+Java fails to start as the `logstash` user (`error while loading shared libraries: libjli.so`).
+Root is not affected, which is why `logstash-plugin` still works. The role trusts every `*.so` file
+under `logstash_home` that the paths below do not already cover.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `logstash_fapolicyd_trust` | `auto` | `auto` acts only when fapolicyd is running; `true` always; `false` never |
-| `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust |
+| `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust, besides the shared libraries |
 | `logstash_fapolicyd_trust_file` | `ansible-logstash` | File under `/etc/fapolicyd/trust.d/` |
 
 The helper is written and trusted before any pipeline is validated. The plugin directory holds
 thousands of files, so refreshing entries after a plugin change takes a while; a fapolicyd rule for
 that directory is the lighter alternative, in which case set `logstash_fapolicyd_trust_paths` to the
-helper alone. A rolling upgrade rewrites the entries too, on each host after its plugins are updated
-and before Logstash starts again.
+helper alone. A rolling upgrade rewrites the entries too, on each host after the new package is installed and its
+plugins are updated, and before Logstash starts again.
 
 **Plugin installs and updates.** fapolicyd trusts files by path, size and checksum, so a plugin
 update puts files fapolicyd has never seen into new gem directories. What that means, and what the
@@ -471,9 +478,10 @@ role does about it:
 - `logstash-plugin update` reads back the gem specifications it has just written, and fapolicyd
   denies that, so the command can report "No plugin updated" when it did update. The role compares
   `Gemfile.lock` before and after instead.
-- A run that stops between the update and the rewrite, or a plugin change made by hand with
-  `logstash-plugin`, leaves entries that no longer match. The role rewrites them on the next run
-  when the plugin directory has changed since the trust file was written.
+- A run that stops between the update and the rewrite, or a change made by hand with
+  `logstash-plugin` or the package manager, leaves entries that no longer match. The role rewrites
+  them on the next run when a directory under `logstash_home` has changed since the trust file was
+  written.
 - The denials are audited, so `ausearch -m fanotify -ts recent` shows them while the entries are
   out of date.
 

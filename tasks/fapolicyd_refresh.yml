@@ -5,7 +5,8 @@
 # reconciled and updated for the new version, before Logstash starts again.
 # Inputs:
 #   _ls_fapolicyd_host   host to act on (tasks are delegated to it); its
-#                        _ls_fapolicyd_trust fact gives the paths and the trust file
+#                        _ls_fapolicyd_trust fact gives the paths, the trust
+#                        file and the Logstash home
 
 - name: "fapolicyd | Check which paths exist on {{ _ls_fapolicyd_host }}"
   ansible.builtin.stat:
@@ -13,6 +14,16 @@
   loop: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.paths }}"
   delegate_to: "{{ _ls_fapolicyd_host }}"
   register: _ls_fapolicyd_path_stat
+
+# Shared libraries already under a trusted directory are left out, because
+# fapolicyd-cli refuses to add a file twice.
+- name: "fapolicyd | Find the shared libraries Logstash ships on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.find:
+    paths: "{{ hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.home }}"
+    patterns: ["*.so", "*.so.*"]
+    recurse: true
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  register: _ls_fapolicyd_libs
 
 - name: "fapolicyd | Remove the previous trust entries on {{ _ls_fapolicyd_host }}"
   ansible.builtin.file:
@@ -37,9 +48,34 @@
   delay: "{{ logstash_task_delay }}"
   changed_when: true
 
+# One task for all of them: there are dozens, and a task each would cost a
+# round trip each on a slow link.
+- name: "fapolicyd | Trust the shared libraries on {{ _ls_fapolicyd_host }}"
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/bin/bash', '-c', _ls_fapolicyd_libs_script, 'fapolicyd-trust-libs',
+          hostvars[_ls_fapolicyd_host]._ls_fapolicyd_trust.name] + _ls_fapolicyd_lib_paths }}
+  vars:
+    # Matches a trusted file, or anything under a trusted directory
+    _ls_fapolicyd_trusted_re: >-
+      ^({{ _ls_fapolicyd_path_stat.results | selectattr('stat.exists')
+           | map(attribute='item') | map('regex_replace', '/+$', '') | map('regex_escape')
+           | map('regex_replace', '$', '(/.*)?') | join('|') }})$
+    _ls_fapolicyd_lib_paths: >-
+      {{ _ls_fapolicyd_libs.files | map(attribute='path') | reject('match', _ls_fapolicyd_trusted_re) | list }}
+    _ls_fapolicyd_libs_script: |
+      trust_file=$1; shift
+      for lib in "$@"; do
+        /usr/sbin/fapolicyd-cli --file add "$lib" --trust-file "$trust_file" || exit
+      done
+  delegate_to: "{{ _ls_fapolicyd_host }}"
+  register: _ls_fapolicyd_libs_added
+  changed_when: true
+  when: _ls_fapolicyd_lib_paths | length > 0
+
 - name: "fapolicyd | Load the trust database on {{ _ls_fapolicyd_host }}"
   ansible.builtin.command:
     cmd: /usr/sbin/fapolicyd-cli --update
   delegate_to: "{{ _ls_fapolicyd_host }}"
   changed_when: true
-  when: _ls_fapolicyd_added is changed
+  when: _ls_fapolicyd_added is changed or _ls_fapolicyd_libs_added is changed

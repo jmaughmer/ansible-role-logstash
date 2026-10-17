@@ -274,7 +274,9 @@ logstash_selinux_log_type: var_log_t
 logstash_selinux_fcontexts: {}
 
 # fapolicyd: trust what Logstash runs but rpm did not install, which means
-# plugins installed with logstash-plugin and the pipeline validation helper.
+# plugins installed with logstash-plugin and the pipeline validation helper,
+# and the package's shared libraries, which the default fapolicyd filter
+# leaves out of the rpm trust.
 #   auto  - manage the trust entries when fapolicyd is running
 #   true / false
 logstash_fapolicyd_trust: auto
