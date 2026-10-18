@@ -100,8 +100,12 @@ _ls_fapolicyd_paths: >-
 # dump: one would land in the Ansible user's working directory.
 _ls_plugin_env: >-
   {{ {'LS_JAVA_OPTS': '-Xms' ~ logstash_plugin_heap_size ~ ' -Xmx' ~ logstash_plugin_heap_size
-                      ~ ' -XX:-HeapDumpOnOutOfMemoryError'}
+                      ~ ' -XX:-HeapDumpOnOutOfMemoryError' ~ _ls_tmp_java_opt}
      | combine(logstash_plugin_install_env) }}
+# The commands this role runs can come before jvm.options has the temporary
+# directory (the first run writes it after the keystore and plugins), so they
+# get it in LS_JAVA_OPTS too. The leading space joins it to other options.
+_ls_tmp_java_opt: "{{ (' -Djava.io.tmpdir=' ~ logstash_tmp_dir) if (logstash_tmp_dir | length) > 0 else '' }}"
 _ls_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ logstash_fapolicyd_trust_file }}"
 # What the entries were written for, so a role change that trusts more gets
 # them rewritten. fapolicyd reads nothing else in /etc/fapolicyd.
@@ -135,7 +139,8 @@ _ls_native_libs:
     entry: "linux/{{ 'amd64' if _ls_arch == 'x86_64' else _ls_arch }}/libzstd-jni-[0-9.-]+[.]so"
     required: false
 _ls_jvm_options: >-
-  {{ logstash_jvm_options
+  {{ (['-Djava.io.tmpdir=' ~ logstash_tmp_dir] if (logstash_tmp_dir | length) > 0 else [])
+     + logstash_jvm_options
      + (['-Djffi.boot.library.path=' ~ logstash_fapolicyd_native_dir,
          '-Djava.library.path=' ~ logstash_fapolicyd_native_dir ~ ':/usr/java/packages/lib:/usr/lib64:/lib64:/lib:/usr/lib']
         if (logstash_fapolicyd_trust | string | lower) != 'false' and _ls_fapolicyd_manage | bool else []) }}
@@ -150,8 +155,9 @@ _ls_api_client_host: >-
 _ls_api_auth: "{{ (logstash_api_auth_basic_username | length) > 0 }}"
 
 _ls_keystore_env: >-
-  {{ {'LOGSTASH_KEYSTORE_PASS': logstash_keystore_password}
-     if (logstash_keystore_password | length) > 0 else {} }}
+  {{ ({'LOGSTASH_KEYSTORE_PASS': logstash_keystore_password}
+      if (logstash_keystore_password | length) > 0 else {})
+     | combine({'LS_JAVA_OPTS': _ls_tmp_java_opt | trim} if (logstash_tmp_dir | length) > 0 else {}) }}
 
 _ls_keystore_desired: >-
   {{ logstash_keystore_entries

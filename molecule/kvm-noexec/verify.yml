@@ -1,0 +1,38 @@
+---
+- name: Verify as in the default scenario
+  ansible.builtin.import_playbook: ../default/verify.yml
+
+- name: Verify Logstash runs without an executable /tmp
+  hosts: logstash
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Read the mount options of /tmp
+      ansible.builtin.command:
+        argv: [findmnt, --noheadings, --output, OPTIONS, --target, /tmp]
+      register: test_tmp_options
+      changed_when: false
+
+    - name: Check /tmp is still noexec
+      ansible.builtin.assert:
+        that:
+          - "'noexec' in test_tmp_options.stdout.split(',')"
+
+    - name: Find the Logstash process
+      ansible.builtin.command: systemctl show --property MainPID --value logstash  # noqa: command-instead-of-module - only reads the state
+      register: test_pid
+      changed_when: false
+
+    # Java deletes the file once it is loaded, but the mapping keeps its path
+    - name: Check JRuby's FFI library was loaded from the role's directory
+      ansible.builtin.command:
+        argv: [grep, -q, " /var/lib/logstash/tmp/jffi", "/proc/{{ test_pid.stdout | trim }}/maps"]
+      changed_when: false
+
+    # As an administrator would: from a noexec directory, with nothing but
+    # jvm.options to point Java elsewhere
+    - name: Run logstash-plugin by hand
+      ansible.builtin.command:
+        argv: [/usr/share/logstash/bin/logstash-plugin, list, logstash-filter-tld]
+        chdir: /tmp
+      changed_when: false

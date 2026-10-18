@@ -535,6 +535,21 @@ the data directory — come out as `default_t`. With `logstash_selinux_manage: a
 - **`semanage` comes from `policycoreutils-python-utils`,** which is required only when the role
   manages contexts.
 
+### noexec /tmp
+
+The STIG mounts `/tmp`, `/var/tmp` and `/dev/shm` (and `/home`) with `noexec`. JRuby's FFI
+library ships inside a jar, and Java unpacks it to its temporary directory and loads it from there on
+every start. On a `noexec` `/tmp` that fails; JRuby then tries the working directory, which the
+`logstash` user cannot write to, so the service stops with `Could not load FFI Provider`.
+`logstash-plugin` and `logstash-keystore` fail the same way unless they run from a writable directory
+that is not `noexec`. The role points `java.io.tmpdir` at `logstash_tmp_dir` (`/var/lib/logstash/tmp`
+by default, owned by `logstash`) in `/etc/logstash/jvm.options`, which those commands read too, so
+they also work when you run them by hand. On a first run the role uses them before it writes
+`jvm.options`, so it passes the same option in `LS_JAVA_OPTS` as well.
+
+The directory has to be on a filesystem without `noexec`. Set `logstash_tmp_dir: ""` to leave
+Java's default.
+
 ## Notes and caveats
 
 - **Check mode** is not supported for first-time installs, because pipeline validation and the plugin and keystore CLIs need the Logstash binaries. It works on hosts where Logstash is already installed.
@@ -627,8 +642,13 @@ running. It installs an old release of `logstash-filter-tld`, updates it with
 `logstash_plugins_update`, and checks that Logstash runs the new release with nothing denied and that
 the trust entries are rewritten only when the plugins changed. It downloads from rubygems.org.
 
+[`molecule/kvm-noexec/`](molecule/kvm-noexec/) runs the kvm scenario with `/tmp`, `/var/tmp`,
+`/dev/shm` and `/home` mounted `noexec`, as the STIG has them, plus a plugin install, and checks
+that JRuby's FFI library is loaded from `logstash_tmp_dir` (see [noexec /tmp](#noexec-tmp)). It
+downloads from rubygems.org.
+
 ```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd; do molecule test -s "$s" || break; done
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd kvm-noexec; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user

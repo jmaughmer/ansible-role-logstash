@@ -1,4 +1,14 @@
 ---
+# jvm.options points java.io.tmpdir here (see logstash_tmp_dir)
+- name: System | Create Java's temporary directory
+  ansible.builtin.file:
+    path: "{{ logstash_tmp_dir }}"
+    state: directory
+    owner: logstash
+    group: logstash
+    mode: "0750"
+  when: logstash_tmp_dir | length > 0
+
 - name: System | Create systemd drop-in directory
   ansible.builtin.file:
     path: /etc/systemd/system/logstash.service.d
