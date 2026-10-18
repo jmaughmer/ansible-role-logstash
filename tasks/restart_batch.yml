@@ -28,7 +28,7 @@
       changed_when: false
       failed_when: false
 
-    - name: Rolling restart | Upgrade Logstash package
+    - name: Rolling restart | Upgrade Logstash package (dnf)
       ansible.builtin.dnf:
         name: "logstash-{{ hostvars[item]._ls_target_version }}"
         state: present
@@ -36,13 +36,37 @@
         lock_timeout: "{{ logstash_dnf_lock_timeout }}"
         enablerepo: "{{ _ls_package_repos if _ls_package_repos | length > 0 else omit }}"
       delegate_to: "{{ item }}"
-      loop: "{{ _ls_batch_upgrades }}"
+      loop: "{{ _ls_batch_upgrades | map('extract', hostvars) | selectattr('_ls_pkg_mgr', 'equalto', 'dnf') | map(attribute='inventory_hostname') | list }}"
       async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
       poll: "{{ logstash_download_async_poll }}"
       register: _ls_roll_upgrade
       until: _ls_roll_upgrade is not failed
       retries: "{{ logstash_task_retries }}"
       delay: "{{ logstash_task_delay }}"
+
+    - name: Rolling restart | Upgrade Logstash package (apt)
+      ansible.builtin.apt:
+        name: "logstash={{ hostvars[item]._ls_apt_version }}"
+        state: present
+        allow_change_held_packages: true
+        allow_downgrade: false
+        cache_valid_time: 3600
+        lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch_upgrades | map('extract', hostvars) | selectattr('_ls_pkg_mgr', 'equalto', 'apt') | map(attribute='inventory_hostname') | list }}"
+      async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+      poll: "{{ logstash_download_async_poll }}"
+      register: _ls_roll_upgrade_apt
+      until: _ls_roll_upgrade_apt is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+
+    - name: Rolling restart | Hold the upgraded Logstash package
+      ansible.builtin.dpkg_selections:
+        name: logstash
+        selection: hold
+      delegate_to: "{{ item }}"
+      loop: "{{ _ls_batch_upgrades | map('extract', hostvars) | selectattr('_ls_pkg_mgr', 'equalto', 'apt') | map(attribute='inventory_hostname') | list }}"
 
     - name: Rolling restart | Reconcile plugins on upgraded hosts
       ansible.builtin.include_tasks: plugins_sync.yml

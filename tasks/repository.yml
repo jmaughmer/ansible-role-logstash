@@ -4,7 +4,9 @@
 
 # ------------------------------------------------------------------ elastic
 - name: Repository | Elastic repository
-  when: logstash_repo_source == 'elastic'
+  when:
+    - logstash_repo_source == 'elastic'
+    - _ls_pkg_mgr == 'dnf'
   block:
     - name: Repository | Import Elastic GPG key
       ansible.builtin.rpm_key:
@@ -28,6 +30,62 @@
         timeout: "{{ logstash_repo_timeout }}"
         retries: "{{ logstash_repo_retries }}"
         enabled: false
+
+# -------------------------------------------------------------- elastic, apt
+# apt has no per-command repository switch, so the source stays enabled and the
+# package is held instead (install.yml), which keeps `apt upgrade` away from it.
+- name: Repository | Elastic apt repository
+  when:
+    - logstash_repo_source == 'elastic'
+    - _ls_pkg_mgr == 'apt'
+  block:
+    - name: Repository | Create the apt keyring directory
+      ansible.builtin.file:
+        path: "{{ _ls_apt_keyring | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      when: logstash_repo_gpgcheck | bool
+
+    # Downloaded once; delete the file to fetch a rotated key.
+    - name: Repository | Download Elastic GPG key
+      ansible.builtin.get_url:
+        url: "{{ logstash_repo_gpgkey }}"
+        dest: "{{ _ls_apt_keyring }}"
+        force: false
+        owner: root
+        group: root
+        mode: "0644"
+      register: _ls_apt_key
+      until: _ls_apt_key is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      when: logstash_repo_gpgcheck | bool
+
+    - name: Repository | Configure Elastic apt source
+      ansible.builtin.copy:
+        dest: "{{ _ls_apt_source }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          Types: deb
+          URIs: {{ logstash_repo_baseurl }}
+          Suites: stable
+          Components: main
+          {{ ('Signed-By: ' ~ _ls_apt_keyring) if logstash_repo_gpgcheck | bool else 'Trusted: yes' }}
+      register: _ls_apt_source_file
+
+    - name: Repository | Update the apt package index
+      ansible.builtin.apt:
+        update_cache: true
+        lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+      register: _ls_apt_update
+      until: _ls_apt_update is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      when: _ls_apt_source_file is changed or _ls_apt_key is changed
 
 # ---------------------------------------------------------------- satellite
 # The repository comes from Red Hat Satellite / Katello through

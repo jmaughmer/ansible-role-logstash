@@ -6,10 +6,22 @@
   hosts: all
   gather_facts: false
   tasks:
+    - name: Read the distribution
+      ansible.builtin.setup:
+        gather_subset: [min]
+
     - name: Install iproute and openssl
       ansible.builtin.dnf:
         name: [iproute, openssl]
         state: present
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Install iproute2 and openssl
+      ansible.builtin.apt:
+        name: [iproute2, openssl]
+        state: present
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
 
     # Stands in for a certificate delivered by another role: the role copies
     # it from this path on the host. The key is encrypted, so the role has to
@@ -45,7 +57,9 @@
         creates: "{{ test_tls_dir }}/molecule.crt"
 
 # firewalld running on ls-1 means the role's firewall tasks open the ports
-# there, while ls-2 reports there is nothing to add them to.
+# there, while ls-2 reports there is nothing to add them to. On Ubuntu ls-1
+# runs ufw instead, Ubuntu's own firewall, which denies incoming connections
+# by default; SSH stays open for Ansible.
 - name: Start firewalld
   hosts: firewalld
   gather_facts: false
@@ -54,9 +68,29 @@
       ansible.builtin.dnf:
         name: firewalld
         state: present
+      when: ansible_facts['os_family'] == 'RedHat'
 
     - name: Start firewalld
       ansible.builtin.systemd_service:
         name: firewalld
         state: started
         enabled: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Install ufw
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Allow SSH through ufw
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Enable ufw
+      community.general.ufw:
+        state: enabled
+      when: ansible_facts['os_family'] == 'Debian'

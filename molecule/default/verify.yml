@@ -12,6 +12,8 @@
   gather_facts: false
   vars:
     test_api: http://127.0.0.1:9600
+    test_debian: "{{ ansible_facts['os_family'] == 'Debian' }}"
+    test_sysconfig: "{{ '/etc/default/logstash' if test_debian | bool else '/etc/sysconfig/logstash' }}"
   tasks:
     - name: Read the role's defaults
       ansible.builtin.include_vars:
@@ -27,9 +29,21 @@
     - name: Check the requested version is installed, running and enabled
       ansible.builtin.assert:
         that:
-          - ansible_facts.packages.logstash | map(attribute='version') | list == [test_defaults.logstash_version]
+          # The Debian package's version carries an epoch and a revision (1:9.5.4-1)
+          - >-
+            ansible_facts.packages.logstash | map(attribute='version')
+            | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-[^-]*$', '') | list
+            == [test_defaults.logstash_version]
           - ansible_facts.services['logstash.service'].state == 'running'
           - ansible_facts.services['logstash.service'].status == 'enabled'
+
+    # Held so a routine `apt upgrade` cannot upgrade Logstash
+    - name: Check the package is held
+      ansible.builtin.command: dpkg-query -W -f='${Status}' logstash
+      register: test_hold
+      changed_when: false
+      failed_when: test_hold.stdout is not match('hold ok installed')
+      when: test_debian | bool
 
     - name: Check the API refuses requests without credentials
       ansible.builtin.uri:
@@ -98,7 +112,7 @@
         - {path: /etc/logstash/pipelines.d, mode: "0750", owner: root, group: logstash}
         - {path: /etc/logstash/pipelines.d/ingest.conf, mode: "0640", owner: root, group: logstash}
         - {path: /etc/logstash/pipelines.d/beats.conf, mode: "0640", owner: root, group: logstash}
-        - {path: /etc/sysconfig/logstash, mode: "0600", owner: root, group: root}
+        - {path: "{{ test_sysconfig }}", mode: "0600", owner: root, group: root}
         - {path: /etc/logstash/logstash.keystore, mode: "0640", owner: root, group: logstash}
         - {path: /etc/logstash/.ansible-keystore-state.json, mode: "0600", owner: root, group: root}
         - {path: /etc/logstash/certs, mode: "0750", owner: root, group: logstash}
@@ -126,7 +140,7 @@
       register: test_conf
       loop:
         - /etc/logstash/jvm.options
-        - /etc/sysconfig/logstash
+        - "{{ test_sysconfig }}"
 
     - name: Check the heap, the extra JVM option and the environment
       vars:
@@ -184,7 +198,7 @@
         that:
           - test_served.stdout == test_installed.stdout
 
-- name: Verify the firewall on the host running firewalld
+- name: Verify the firewall on the host running firewalld (ufw on Ubuntu)
   hosts: firewalld
   become: true
   gather_facts: false
@@ -194,6 +208,7 @@
       register: test_ports
       changed_when: false
       loop: ["", --permanent]
+      when: ansible_facts['os_family'] == 'RedHat'
 
     - name: Check the input ports are open
       ansible.builtin.assert:
@@ -203,6 +218,23 @@
       loop: "{{ test_ports.results }}"
       loop_control:
         label: "{{ item.item or 'runtime' }}"
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Read the ufw rules
+      ansible.builtin.command: ufw show added
+      register: test_ufw
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check the input ports are allowed
+      vars:
+        test_ufw_ports: >-
+          {{ test_ufw.stdout_lines | select('match', '^ufw allow [0-9]') | map('split') | map(attribute=2) | sort | list }}
+      ansible.builtin.assert:
+        that:
+          - test_ufw_ports == ['22/tcp', '5044/tcp', '8080/tcp']
+        fail_msg: "{{ test_ufw.stdout }}"
+      when: ansible_facts['os_family'] == 'Debian'
 
 # Each host sends an event to the other's address, so the input is reachable
 # from the network (through ls-1's firewall), and checks the event its peer

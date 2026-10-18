@@ -2,13 +2,28 @@
 # Runs only when a package install or upgrade is about to happen. Confirms the
 # pinned version exists in the package source before anything is changed; with
 # Satellite this catches content views that were not published or promoted.
+# The index has to be current to list a version published since the last update.
+- name: Install | Update the apt package index
+  ansible.builtin.apt:
+    update_cache: true
+    lock_timeout: "{{ logstash_dnf_lock_timeout }}"
+  register: _ls_apt_index
+  until: _ls_apt_index is not failed
+  retries: "{{ logstash_task_retries }}"
+  delay: "{{ logstash_task_delay }}"
+  changed_when: false
+  check_mode: false
+  when: _ls_pkg_mgr == 'apt'
+
+# apt-cache madison prints 'logstash | 9.5.4 | <source>' per version.
 - name: Install | Query available Logstash versions
   ansible.builtin.command:
     argv: >-
-      {{ ['dnf', '-q', 'repoquery', '--qf', '%{version}']
-         + ((['--disablerepo=*'] + (_ls_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
-            if _ls_package_repos | length > 0 else [])
-         + ['logstash'] }}
+      {{ ['apt-cache', 'madison', 'logstash'] if _ls_pkg_mgr == 'apt'
+         else ['dnf', '-q', 'repoquery', '--qf', '%{version}']
+              + ((['--disablerepo=*'] + (_ls_package_repos | map('regex_replace', '^', '--enablerepo=') | list))
+                 if _ls_package_repos | length > 0 else [])
+              + ['logstash'] }}
   register: _ls_available_versions
   until: _ls_available_versions is not failed
   retries: "{{ logstash_task_retries }}"
@@ -19,7 +34,9 @@
 - name: Install | Verify the requested Logstash version is available
   vars:
     _ls_versions: >-
-      {{ _ls_available_versions.stdout_lines | map('trim') | select('match', '^[0-9]') | unique | list }}
+      {{ _ls_available_versions.stdout_lines
+         | map('regex_replace', '^[^|]*[|]([^|]*)[|].*$', '\1')
+         | map('trim') | map('regex_replace', '^[0-9]+:', '') | map('regex_replace', '-[^-]*$', '') | select('match', '^[0-9]') | unique | list }}
   ansible.builtin.assert:
     that:
       - logstash_version in _ls_versions

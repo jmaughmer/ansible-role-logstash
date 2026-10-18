@@ -8,6 +8,13 @@ _ls_package_repos: >-
   {{ [_ls_repo_name] if logstash_repo_source == 'elastic'
      else ([logstash_satellite_repo_id] if logstash_repo_source == 'satellite' else []) }}
 _ls_python: "{{ ansible_facts['python']['executable'] | default('/usr/bin/python3') }}"
+# apt source on Ubuntu. The elasticsearch, kibana, logstash and elastic_fleet roles
+# write the same key and source, so a host running several of them ends up with one
+# definition (apt refuses two definitions of one URI with different keys).
+_ls_apt_keyring: /etc/apt/keyrings/elastic.asc
+_ls_apt_source: "/etc/apt/sources.list.d/elastic-{{ _ls_major_version }}.x.sources"
+# Environment file the packaged unit reads
+_ls_sysconfig_file: "{{ '/etc/default/logstash' if ansible_facts['os_family'] == 'Debian' else '/etc/sysconfig/logstash' }}"
 _ls_keystore_path: "{{ logstash_conf_dir }}/logstash.keystore"
 _ls_keystore_state_file: "{{ logstash_conf_dir }}/.ansible-keystore-state.json"
 _ls_validate_script: /usr/local/libexec/ansible-logstash-validate-pipeline
@@ -124,3 +131,6 @@ _ls_ssl_ca_path: >-
      else ((_ls_ssl_entries | selectattr('ca', 'defined') | map(attribute='ca')
             | selectattr('path', 'defined') | map(attribute='path') | first | default(''))
            or logstash_ssl_ca_certificate_path) }}
+
+# ufw (Ubuntu's firewall) is active
+_ls_ufw_active: "{{ (_ls_ufw_state.stdout | default('')) is search('^Status: active', multiline=True) }}"
