@@ -148,6 +148,7 @@
   delegate_to: "{{ _ls_fapolicyd_host }}"
   register: _ls_fapolicyd_fingerprint_now
   changed_when: false
+  check_mode: false
 
 - name: "fapolicyd | Record what the entries were written for on {{ _ls_fapolicyd_host }}"
   ansible.builtin.copy:
