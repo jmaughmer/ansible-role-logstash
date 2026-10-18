@@ -21,7 +21,7 @@ What it does:
   ansible-galaxy collection install -r requirements.yml
   ```
 
-- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd) — fapolicyd has to allow Ansible before anything runs. They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
+- **Target hosts:** RHEL, AlmaLinux or Rocky Linux 9 or 10, or Ubuntu 24.04 or 26.04 (see [Supported platforms](#supported-platforms)), with `openssl` installed. On STIG-hardened hosts see [Hardened hosts](#hardened-hosts-fips-selinux-fapolicyd). They need a package source: Elastic's repository (`artifacts.elastic.co`) or a mirror, or (Enterprise Linux only) a Red Hat Satellite or Katello server. See [Package source](#package-source).
 - **Plugins:** hosts that install plugins from rubygems need access to it, or a proxy (`logstash_plugin_install_env`), or offline plugin packs.
 
 ## Supported platforms
@@ -436,19 +436,15 @@ The role is meant to run on hosts with the DISA STIG applied. What that takes:
 
 ### fapolicyd
 
-**Ansible itself has to be allowed first.** fapolicyd blocks whatever it does not trust, and that
-includes the Python module Ansible copies to the host for *every* task. Nothing runs until that is
-allowed, so add a rule once, before using these roles:
-
-```
-# /etc/fapolicyd/rules.d/30-ansible.rules
-allow perm=open exe=/usr/bin/python3.9 : dir=/root/.ansible/tmp/
-```
-
-Load it with `fagenrules --load`. The file has to sort before the rules that deny untrusted
-interpreted files, and the interpreter and directory have to match the host's Python and the user you
-become (`ansible_remote_tmp`). The same rule covers the `repo_lookup.py` helper these roles run in
-Satellite mode. Denials are audited, so `ausearch -m fanotify -ts recent` shows what was blocked.
+**Ansible needs no rule of its own.** Ansible runs every task through a Python file it copies to the
+host, and fapolicyd denies Python files it does not trust. But its default rules include
+`allow perm=any uid=0 trust=1 : all`, which lets root's trusted programs open anything, and these
+roles run as root (`become`), so Ansible and the `repo_lookup.py` helper used in Satellite mode work
+unchanged; this was tested with fapolicyd enforcing on AlmaLinux 10. Only modules run as an
+unprivileged user are denied (`AnsiballZ_*.py`), unless SSH pipelining is on, which hands them to
+Python on its standard input. Where that rule has been removed, allow Ansible's Python to open files
+in its temporary directory (`~/.ansible/tmp` of the user Ansible connects as). Denials are audited,
+so `ausearch -m fanotify -ts recent` shows what was blocked.
 
 **What Logstash runs that rpm did not install:** plugins added with `logstash-plugin`, and the
 pipeline validation helper this role writes to `/usr/local/libexec`. Without trust entries fapolicyd
@@ -514,7 +510,8 @@ What matters in practice:
 - **Private keys must not be in the traditional encrypted PEM format.** A key starting with
   `Proc-Type: 4,ENCRYPTED` derives its key with MD5 and cannot be read in FIPS mode — including by
   the `openssl pkcs8` conversion this role runs for the `beats` input. Preflight fails with that
-  message when the host reports FIPS. Convert it once with `openssl pkcs8 -topk8 -in old.key -out new.key`,
+  message when the host reports FIPS. Convert it once, on a machine without FIPS mode, with
+  `openssl pkcs8 -topk8 -in old.key -out new.key`,
   or let [ansible-role-elastic-tls](https://github.com/jmaughmer/ansible-role-elastic-tls) issue the
   keys, which are PKCS#8 already.
 - **TLS settings live in the pipelines,** so protocol and cipher choices for inputs and outputs are

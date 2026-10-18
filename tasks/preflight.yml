@@ -222,7 +222,8 @@
     fail_msg: >-
       A private key in logstash_ssl_certificate_names is in the traditional encrypted PEM format
       (Proc-Type: 4,ENCRYPTED), whose key derivation uses MD5, and this host runs in FIPS mode.
-      Convert it first: openssl pkcs8 -topk8 -in old.key -out new.key
+      Convert it on a machine without FIPS mode, which can still read it:
+      openssl pkcs8 -topk8 -in old.key -out new.key
     quiet: true
   when: ansible_facts['fips'] | default(false) | bool
   no_log: "{{ logstash_no_log }}"
