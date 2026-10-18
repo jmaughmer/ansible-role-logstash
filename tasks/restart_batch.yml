@@ -77,8 +77,9 @@
       loop_control:
         loop_var: _ls_upgrade_host
 
-    # Reconciling and updating plugins rewrites files under vendor/bundle, so
-    # fapolicyd would refuse them once Logstash starts.
+    # The new package replaces the shared libraries, and reconciling and
+    # updating plugins rewrites files under vendor/bundle, so fapolicyd would
+    # refuse them once Logstash starts.
     - name: Rolling restart | Refresh fapolicyd trust on upgraded hosts
       ansible.builtin.include_tasks:
         file: fapolicyd_refresh.yml
@@ -87,7 +88,7 @@
       vars:
         _ls_fapolicyd_host: "{{ _ls_trust_host }}"
       loop: >-
-        {{ (_ls_batch_upgrades if logstash_plugins | length > 0 else [])
+        {{ _ls_batch_upgrades
            | select('in', ansible_play_hosts | map('extract', hostvars)
                | selectattr('_ls_fapolicyd_trust', 'defined') | selectattr('_ls_fapolicyd_trust')
                | map(attribute='inventory_hostname') | list) | list }}

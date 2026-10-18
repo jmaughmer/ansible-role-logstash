@@ -3,8 +3,25 @@
 # Inputs:
 #   _ls_plugin_host           host to act on (tasks are delegated to it)
 #   _ls_plugin_after_upgrade  also update unpinned plugins to match the new Logstash
+#                             (logstash_plugins_update does so on every run)
 # Output:
 #   _ls_plugins_changed
+
+# logstash-plugin restores the Gemfile when it fails with an error, but not
+# when the JVM dies (out of memory, killed), and then every later
+# logstash-plugin command fails because the Gemfile and its lock file
+# disagree. The install and update wrappers keep a copy and put it back.
+- name: "Plugins | Set the Gemfile guard for {{ _ls_plugin_host }}"
+  ansible.builtin.set_fact:
+    _ls_plugin_gemfile_guard: >-
+      home={{ logstash_home | quote }};
+      cp -p "$home/Gemfile" "$home/Gemfile.ansible-backup" &&
+      cp -p "$home/Gemfile.lock" "$home/Gemfile.lock.ansible-backup" || exit;
+      restore() { rc=$?;
+      mv -f "$home/Gemfile.ansible-backup" "$home/Gemfile";
+      mv -f "$home/Gemfile.lock.ansible-backup" "$home/Gemfile.lock";
+      exit $rc; };
+      trap 'rm -f "$home/Gemfile.ansible-backup" "$home/Gemfile.lock.ansible-backup"' EXIT
 
 - name: "Plugins | List installed plugins on {{ _ls_plugin_host }}"
   ansible.builtin.command:
@@ -12,6 +29,7 @@
       - "{{ logstash_home }}/bin/logstash-plugin"
       - list
       - --verbose
+  environment: "{{ _ls_plugin_env }}"
   delegate_to: "{{ _ls_plugin_host }}"
   register: _ls_plugin_list
   changed_when: false
@@ -54,6 +72,7 @@
       - remove
       - "{{ item }}"
   loop: "{{ _ls_plugin_remove }}"
+  environment: "{{ _ls_plugin_env }}"
   delegate_to: "{{ _ls_plugin_host }}"
   register: _ls_plugin_removed
 
@@ -77,12 +96,13 @@
         echo "$name is already installed"
         exit 0
       fi
-      exec "$plugin_cli" install "$@"
+      {{ _ls_plugin_gemfile_guard }}
+      "$plugin_cli" install "$@" || restore
   loop: "{{ (hostvars[_ls_plugin_host]._ls_plugins_raw | select('string') | list) + _ls_plugin_present_dicts }}"
   loop_control:
     label: "{{ item.name if item is mapping else item }}"
   when: (item.name if item is mapping else item) not in (_ls_plugin_installed | difference(_ls_plugin_remove))
-  environment: "{{ logstash_plugin_install_env }}"
+  environment: "{{ _ls_plugin_env }}"
   delegate_to: "{{ _ls_plugin_host }}"
   async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
   poll: "{{ logstash_download_async_poll }}"
@@ -92,26 +112,54 @@
   delay: "{{ logstash_task_delay }}"
   changed_when: true
 
-- name: "Plugins | Update unpinned plugins after upgrade on {{ _ls_plugin_host }}"
-  ansible.builtin.command:
-    argv: "{{ [logstash_home ~ '/bin/logstash-plugin', 'update'] + _ls_plugin_unpinned }}"
-  vars:
+- name: "Plugins | Select plugins to update on {{ _ls_plugin_host }}"
+  ansible.builtin.set_fact:
+    # plain names and dicts without a version or source, that are installed
     _ls_plugin_unpinned: >-
       {{ ((hostvars[_ls_plugin_host]._ls_plugins_raw | select('string') | list)
           + (_ls_plugin_present_dicts | rejectattr('version', 'defined') | rejectattr('source', 'defined')
              | map(attribute='name') | list)) | select('in', _ls_plugin_installed) | list }}
-  environment: "{{ logstash_plugin_install_env }}"
-  delegate_to: "{{ _ls_plugin_host }}"
-  async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
-  poll: "{{ logstash_download_async_poll }}"
-  register: _ls_plugin_updated
-  until: _ls_plugin_updated is not failed
-  retries: "{{ logstash_task_retries }}"
-  delay: "{{ logstash_task_delay }}"
-  changed_when: "'Updated' in (_ls_plugin_updated.stdout | default(''))"
+
+- name: "Plugins | Update unpinned plugins on {{ _ls_plugin_host }}"
   when:
-    - _ls_plugin_after_upgrade | bool
+    - (_ls_plugin_after_upgrade | bool) or (logstash_plugins_update | bool)
     - _ls_plugin_unpinned | length > 0
+  block:
+    - name: "Plugins | Read the plugin lock file on {{ _ls_plugin_host }}"
+      ansible.builtin.stat:
+        path: "{{ logstash_home }}/Gemfile.lock"
+      delegate_to: "{{ _ls_plugin_host }}"
+      register: _ls_plugin_lock
+
+    # Bundler's lock file changes exactly when installed versions do, also for
+    # dependencies and bundled plugins an update moves, so the wrapper
+    # compares it with the checksum taken before the first attempt, which a
+    # retry does not reset.
+    - name: "Plugins | Update unpinned plugins on {{ _ls_plugin_host }}"
+      ansible.builtin.command:
+        argv: >-
+          {{ ['/bin/bash', '-c', _ls_plugin_update_script, 'logstash-plugin-update',
+              logstash_home ~ '/Gemfile.lock', _ls_plugin_lock.stat.checksum | default(''),
+              logstash_home ~ '/bin/logstash-plugin', 'update'] + _ls_plugin_unpinned }}
+      vars:
+        _ls_plugin_update_script: |
+          set -o pipefail
+          lock=$1 before=$2; shift 2
+          {{ _ls_plugin_gemfile_guard }}
+          "$@" || restore
+          after=$(sha1sum "$lock" | cut -d ' ' -f 1)
+          if [ "$after" != "$before" ]; then
+            echo "ansible: installed plugin versions changed"
+          fi
+      environment: "{{ _ls_plugin_env }}"
+      delegate_to: "{{ _ls_plugin_host }}"
+      async: "{{ 0 if ansible_check_mode else logstash_download_async_timeout }}"
+      poll: "{{ logstash_download_async_poll }}"
+      register: _ls_plugin_updated
+      until: _ls_plugin_updated is not failed
+      retries: "{{ logstash_task_retries }}"
+      delay: "{{ logstash_task_delay }}"
+      changed_when: "'ansible: installed plugin versions changed' in (_ls_plugin_updated.stdout | default(''))"
 
 - name: "Plugins | Record plugin changes for {{ _ls_plugin_host }}"
   ansible.builtin.set_fact:

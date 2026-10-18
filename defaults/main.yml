@@ -214,6 +214,12 @@ logstash_ssl_dir: /etc/logstash/certs
 logstash_plugins: []
 # Environment for logstash-plugin, e.g. { HTTPS_PROXY: "http://proxy:3128" }
 logstash_plugin_install_env: {}
+# Heap for logstash-plugin. Otherwise it takes jvm.options' heap, and
+# resolving an update needs more than 512m.
+logstash_plugin_heap_size: 1g
+# Update the unpinned plugins above (no version or source) to their latest
+# release on every run. They are always updated after a Logstash upgrade.
+logstash_plugins_update: false
 
 # =============================================================================
 # Operating system / systemd
@@ -271,7 +277,9 @@ logstash_selinux_log_type: var_log_t
 logstash_selinux_fcontexts: {}
 
 # fapolicyd: trust what Logstash runs but rpm did not install, which means
-# plugins installed with logstash-plugin and the pipeline validation helper.
+# plugins installed with logstash-plugin and the pipeline validation helper,
+# and the package's shared libraries, which the default fapolicyd filter
+# leaves out of the rpm trust.
 #   auto  - manage the trust entries when fapolicyd is running
 #   true / false
 logstash_fapolicyd_trust: auto
@@ -284,6 +292,10 @@ logstash_fapolicyd_trust_paths: []
 logstash_fapolicyd_trust_file: ansible-logstash
 # Rewrite the entries even when nothing changed
 logstash_fapolicyd_force_trust: false
+# Where native libraries shipped inside jars (JRuby's FFI, zstd-jni) are
+# unpacked to and trusted. jvm.options gets -Djffi.boot.library.path and
+# -Djava.library.path pointing here. Only this role's files belong in it.
+logstash_fapolicyd_native_dir: /usr/local/lib/ansible-logstash
 
 # =============================================================================
 # Network resilience (high-latency / low-bandwidth links)

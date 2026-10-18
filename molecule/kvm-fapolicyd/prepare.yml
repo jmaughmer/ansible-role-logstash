@@ -1,0 +1,56 @@
+---
+# Not ../kvm/prepare.yml: that one also sets up the default scenario's two
+# hosts, TLS files and firewalls, which this scenario does not use.
+- name: Wait for cloud-init
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Wait for cloud-init to finish
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+      failed_when: false
+
+    # The role needs the openssl CLI (see the README's requirements)
+    - name: Install openssl
+      ansible.builtin.dnf:
+        name: openssl
+        state: present
+
+# Ansible's own module files are not trusted either, so its Python is allowed
+# to open anything first (see the README's fapolicyd section). Logstash gets
+# no such rule: the role's trust entries are what is being tested.
+- name: Run fapolicyd
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Install fapolicyd
+      ansible.builtin.dnf:
+        name: fapolicyd
+        state: present
+
+    - name: Find the Python Ansible runs
+      ansible.builtin.command:
+        argv: [readlink, -f, "{{ ansible_facts['python']['executable'] }}"]
+      register: test_python
+      changed_when: false
+
+    - name: Allow Ansible's Python
+      ansible.builtin.copy:
+        dest: /etc/fapolicyd/rules.d/30-ansible.rules
+        content: |
+          allow perm=any exe={{ test_python.stdout }} : all
+        owner: root
+        group: fapolicyd
+        mode: "0644"
+
+    - name: Compile the rules
+      ansible.builtin.command: fagenrules --load
+      changed_when: true
+
+    - name: Start fapolicyd
+      ansible.builtin.systemd_service:
+        name: fapolicyd
+        state: started
+        enabled: true

@@ -1,0 +1,77 @@
+---
+- name: Verify the updated plugin runs under fapolicyd
+  hosts: logstash
+  become: true
+  gather_facts: false
+  vars:
+    test_api: http://127.0.0.1:9600
+  tasks:
+    - name: Check fapolicyd is still running
+      ansible.builtin.command: systemctl is-active fapolicyd  # noqa: command-instead-of-module - only reads the state
+      changed_when: false
+
+    - name: List the installed plugin
+      ansible.builtin.command:
+        argv: [/usr/share/logstash/bin/logstash-plugin, list, --verbose, "{{ test_plugin }}"]
+      register: test_list
+      changed_when: false
+
+    - name: Read the installed version
+      ansible.builtin.set_fact:
+        test_version: "{{ test_list.stdout | regex_search(test_plugin ~ ' [(]([^)]+)[)]', '\\1') | first }}"
+
+    - name: Check the plugin was updated
+      ansible.builtin.assert:
+        that:
+          - test_version is version(test_plugin_old_version, '>')
+        fail_msg: "{{ test_plugin }} is still at {{ test_version }}"
+
+    - name: Read the plugins Logstash has loaded
+      ansible.builtin.uri:
+        url: "{{ test_api }}/_node/plugins"
+      register: test_plugins
+
+    # Shows Logstash was restarted after the update
+    - name: Check Logstash runs the new release
+      ansible.builtin.assert:
+        that:
+          - >-
+            test_plugins.json.plugins | selectattr('name', 'equalto', test_plugin)
+            | map(attribute='version') | list == [test_version]
+
+    - name: Check the trust entries cover the new release
+      ansible.builtin.command:
+        argv: [grep, -q, "/gems/{{ test_plugin }}-{{ test_version }}/", /etc/fapolicyd/trust.d/ansible-logstash]
+      changed_when: false
+
+    - name: Send an event through the plugin
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080
+        method: POST
+        body_format: json
+        # Not url.domain: the http input sets that from the request
+        body:
+          site: www.example.co.uk
+
+    - name: Wait for the event
+      ansible.builtin.command:
+        argv: [grep, -q, '"tld":"co.uk"', "{{ test_output_file }}"]
+      register: test_event
+      until: test_event.rc == 0
+      retries: 12
+      delay: 5
+      changed_when: false
+
+    - name: Read what fapolicyd denied
+      ansible.builtin.command: ausearch -m FANOTIFY -i
+      register: test_denials
+      changed_when: false
+      failed_when: test_denials.rc not in [0, 1]
+
+    # Anything at all: a library Java unpacks to /tmp shows up only as an
+    # open by Logstash's Java, not as a path under its home
+    - name: Check fapolicyd denied nothing
+      ansible.builtin.assert:
+        that:
+          - test_denials.rc == 1
+        fail_msg: "{{ test_denials.stdout_lines }}"

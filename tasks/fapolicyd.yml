@@ -2,23 +2,24 @@
 # fapolicyd only allows code it trusts, and its trust comes from the rpm
 # database. Neither the plugins logstash-plugin unpacks nor the pipeline
 # validation helper this role writes are installed by rpm, so both have to be
-# trusted explicitly or fapolicyd refuses to run them.
-- name: fapolicyd | Check whether fapolicyd is running
-  ansible.builtin.command:
-    cmd: systemctl is-active fapolicyd
-  register: _ls_fapolicyd_state
-  changed_when: false
-  failed_when: false
-  check_mode: false
-  when: (logstash_fapolicyd_trust | string | lower) == 'auto'
-
+# trusted explicitly or fapolicyd refuses to run them. Nor are the shared
+# libraries the Logstash package ships, such as the bundled JDK's: the default
+# fapolicyd-filter.conf leaves usr/share/ out of the rpm trust except for
+# scripts and archives, so Java cannot start as the logstash user. And native
+# libraries shipped inside jars (JRuby's FFI, zstd-jni) would be unpacked to a
+# new temporary file on every start, which nothing can trust in advance, so
+# they are unpacked once to a fixed directory, trusted there, and jvm.options
+# points Java at it.
 # Published as a fact: a rolling upgrade updates plugins on each host and
 # refreshes its entries from the host that runs the upgrade, which cannot see
 # this host's role variables through hostvars.
 - name: fapolicyd | Record what this host trusts
   ansible.builtin.set_fact:
     _ls_fapolicyd_trust: >-
-      {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file}
+      {{ {'paths': _ls_fapolicyd_paths, 'path': _ls_fapolicyd_trust_file, 'name': logstash_fapolicyd_trust_file,
+          'home': logstash_home, 'patterns': _ls_fapolicyd_rpm_patterns,
+          'state': _ls_fapolicyd_state_file, 'spec': _ls_fapolicyd_spec,
+          'native_dir': logstash_fapolicyd_native_dir, 'native_libs': _ls_native_libs}
          if _ls_fapolicyd_manage | bool else {} }}
 
 - name: fapolicyd | Manage the trust database
@@ -44,6 +45,26 @@
         path: "{{ _ls_fapolicyd_trust_file }}"
       register: _ls_fapolicyd_file
 
+    - name: fapolicyd | Read what the entries were written for
+      ansible.builtin.slurp:
+        src: "{{ _ls_fapolicyd_state_file }}"
+      register: _ls_fapolicyd_state_read
+      failed_when: false
+      when: _ls_fapolicyd_file.stat.exists
+
+    # What the entries cover changes with the package and with the plugins,
+    # whose versions Gemfile.lock records. A fingerprint that differs from
+    # the recorded one means a change after the entries were written: by
+    # hand, or in a run that stopped before it refreshed them. Directory
+    # modification times would not do: logstash-plugin update rewrites files
+    # even when it changes nothing.
+    - name: fapolicyd | Read the package and plugin fingerprint
+      ansible.builtin.command:
+        argv: "{{ _ls_fapolicyd_fingerprint_argv }}"
+      register: _ls_fapolicyd_fingerprint
+      changed_when: false
+      check_mode: false
+
     # The entries hold a size and a checksum per file, so they are rewritten
     # whenever the files they cover have changed.
     - name: fapolicyd | Refresh the trust entries
@@ -56,5 +77,7 @@
       when: >-
         (not _ls_fapolicyd_file.stat.exists)
         or (_ls_plugins_changed | default(false) | bool)
+        or (_ls_fapolicyd_state_read.content | default('e30=') | b64decode | from_json)
+           != {'spec': _ls_fapolicyd_spec, 'fingerprint': _ls_fapolicyd_fingerprint.stdout}
         or (_ls_validate_helper is defined and _ls_validate_helper is changed)
         or (logstash_fapolicyd_force_trust | bool)

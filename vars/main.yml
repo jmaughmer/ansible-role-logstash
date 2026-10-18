@@ -96,7 +96,49 @@ _ls_fapolicyd_paths: >-
   {{ logstash_fapolicyd_trust_paths if (logstash_fapolicyd_trust_paths | length) > 0
      else (([_ls_validate_script] if logstash_pipeline_validate | bool else [])
            + ([logstash_home ~ '/vendor/bundle'] if (logstash_plugins | length) > 0 else [])) }}
+# logstash-plugin reads jvm.options, and LS_JAVA_OPTS comes after it. No heap
+# dump: one would land in the Ansible user's working directory.
+_ls_plugin_env: >-
+  {{ {'LS_JAVA_OPTS': '-Xms' ~ logstash_plugin_heap_size ~ ' -Xmx' ~ logstash_plugin_heap_size
+                      ~ ' -XX:-HeapDumpOnOutOfMemoryError'}
+     | combine(logstash_plugin_install_env) }}
 _ls_fapolicyd_trust_file: "/etc/fapolicyd/trust.d/{{ logstash_fapolicyd_trust_file }}"
+# What the entries were written for, so a role change that trusts more gets
+# them rewritten. fapolicyd reads nothing else in /etc/fapolicyd.
+_ls_fapolicyd_state_file: "/etc/fapolicyd/{{ logstash_fapolicyd_trust_file }}.ansible.json"
+# Files under logstash_home that rpm installed but the default
+# fapolicyd-filter.conf leaves out of the rpm trust: shared libraries, and
+# the JDK's helper executables in jdk/lib (jspawnhelper starts child
+# processes).
+_ls_fapolicyd_rpm_patterns: ["*.so", "*.so.*", jspawnhelper, jexec]
+# rpm's view of the package and the plugin lock file, see fapolicyd.yml
+_ls_fapolicyd_fingerprint_argv:
+  - /bin/bash
+  - -c
+  - set -o pipefail; { rpm -q logstash; cat "$1/Gemfile.lock"; } | sha256sum | cut -d ' ' -f 1
+  - fapolicyd-fingerprint
+  - "{{ logstash_home }}"
+_ls_fapolicyd_spec: >-
+  {{ {'home': logstash_home, 'paths': _ls_fapolicyd_paths, 'patterns': _ls_fapolicyd_rpm_patterns,
+      'native_dir': logstash_fapolicyd_native_dir, 'native_libs': _ls_native_libs} }}
+_ls_arch: "{{ ansible_facts['architecture'] | default('x86_64') | replace('arm64', 'aarch64') }}"
+# Native libraries the package ships inside jars, which would otherwise be
+# unpacked to a random temporary file on every start (see fapolicyd.yml).
+# jar is a glob under logstash_home, entry a regular expression.
+#   jffi      - JRuby's FFI, needed to start; found through jffi.boot.library.path
+#   zstd-jni  - zstd compression; System.loadLibrary through java.library.path
+_ls_native_libs:
+  - jar: vendor/jruby/lib/jruby.jar
+    entry: "jni/{{ _ls_arch }}-Linux/libjffi-[0-9.]+[.]so"
+    required: true
+  - jar: logstash-core/lib/jars/zstd-jni-*.jar
+    entry: "linux/{{ 'amd64' if _ls_arch == 'x86_64' else _ls_arch }}/libzstd-jni-[0-9.-]+[.]so"
+    required: false
+_ls_jvm_options: >-
+  {{ logstash_jvm_options
+     + (['-Djffi.boot.library.path=' ~ logstash_fapolicyd_native_dir,
+         '-Djava.library.path=' ~ logstash_fapolicyd_native_dir ~ ':/usr/java/packages/lib:/usr/lib64:/lib64:/lib:/usr/lib']
+        if (logstash_fapolicyd_trust | string | lower) != 'false' and _ls_fapolicyd_manage | bool else []) }}
 _ls_fapolicyd_manage: >-
   {{ (logstash_fapolicyd_trust | string | lower) in ['true', 'yes']
      or ((logstash_fapolicyd_trust | string | lower) == 'auto'

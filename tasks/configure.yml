@@ -20,8 +20,8 @@
   ansible.builtin.blockinfile:
     path: "{{ logstash_conf_dir }}/jvm.options"
     marker: "# {mark} ANSIBLE MANAGED JVM OPTIONS"
-    block: "{{ logstash_jvm_options | join('\n') }}"
-    state: "{{ 'present' if logstash_jvm_options | length > 0 else 'absent' }}"
+    block: "{{ _ls_jvm_options | join('\n') }}"
+    state: "{{ 'present' if _ls_jvm_options | length > 0 else 'absent' }}"
   register: _ls_jvm_extra
 
 - name: Configure | Flag restart for settings changes

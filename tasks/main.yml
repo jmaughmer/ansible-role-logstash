@@ -52,9 +52,7 @@
 
 - name: Manage fapolicyd trust
   ansible.builtin.import_tasks: fapolicyd.yml
-  when:
-    - (logstash_fapolicyd_trust | string | lower) != 'false'
-    - _ls_fapolicyd_paths | length > 0
+  when: (logstash_fapolicyd_trust | string | lower) != 'false'
   tags: [logstash, logstash_plugins, logstash_pipelines]
 
 - name: Render settings

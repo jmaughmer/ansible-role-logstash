@@ -343,7 +343,22 @@ logstash_plugins:
     state: absent
 ```
 
-Set `logstash_plugin_install_env` for a proxy, for example `HTTPS_PROXY`. After an upgrade, unpinned plugins are updated with `logstash-plugin update`.
+Set `logstash_plugin_install_env` for a proxy, for example `HTTPS_PROXY`.
+
+**Updates.** Unpinned plugins, those without a `version` or `source`, are updated with
+`logstash-plugin update` after every Logstash upgrade. Set `logstash_plugins_update: true` to update
+them on every run as well. Only the plugins listed in `logstash_plugins` are updated, never the ones
+bundled with Logstash, which Elastic ships at versions tested with that release. An update that
+changes anything restarts Logstash through the rolling restart, so the new code is loaded.
+
+The role tells whether an update changed anything from Bundler's `Gemfile.lock`, which also
+catches dependencies and bundled plugins the update moved. To pin a plugin back to an older
+release, give its `version`.
+
+`logstash-plugin` runs with a heap of `logstash_plugin_heap_size` (`1g`) rather than the one in
+`jvm.options`: an update needs more than 512 MB to resolve. If it dies anyway (out of memory,
+killed), the role puts back the `Gemfile` and `Gemfile.lock` it had before. Otherwise the two
+would disagree and every later `logstash-plugin` command would fail.
 
 ## Slow and unreliable networks
 
@@ -439,17 +454,51 @@ Satellite mode. Denials are audited, so `ausearch -m fanotify -ts recent` shows 
 pipeline validation helper this role writes to `/usr/local/libexec`. Without trust entries fapolicyd
 blocks both — the helper visibly, since `logstash_pipeline_validate` then fails on every run.
 
+**What rpm installed but fapolicyd does not trust.** The default
+`/etc/fapolicyd/fapolicyd-filter.conf` leaves `usr/share/` out of the rpm trust apart from scripts
+and archives. Root is not affected, which is why `logstash-plugin` still works, but as the
+`logstash` user:
+
+- Java fails to start, because the bundled JDK's `libjli.so` and the other shared libraries are not
+  trusted (`error while loading shared libraries: libjli.so`). The JDK's `jspawnhelper`, which starts
+  child processes, is refused too. The role trusts every `*.so` file, `jspawnhelper` and `jexec`
+  under `logstash_home` that the paths below do not already cover.
+- Some native libraries live inside jars and are unpacked to a new temporary file on every start,
+  which nothing can trust in advance. JRuby's FFI library is needed to start at all (`Could not load
+  FFI Provider`); zstd-jni's is denied when the first event arrives. The role unpacks both once to
+  `logstash_fapolicyd_native_dir` (`/usr/local/lib/ansible-logstash`), trusts them there, and adds
+  `-Djffi.boot.library.path` and `-Djava.library.path` to `jvm.options` so Java loads those copies.
+  The Kafka and WebHDFS integrations carry their own (zstd-jni, lz4-java, snappy-java), which this
+  does not cover: if you use them, check `ausearch -m fanotify` and point those libraries at a
+  trusted copy with their own system properties.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `logstash_fapolicyd_trust` | `auto` | `auto` acts only when fapolicyd is running; `true` always; `false` never |
-| `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust |
+| `logstash_fapolicyd_trust_paths` | helper, plus the plugin directory when plugins are managed | Paths to trust, besides the shared libraries |
 | `logstash_fapolicyd_trust_file` | `ansible-logstash` | File under `/etc/fapolicyd/trust.d/` |
+| `logstash_fapolicyd_native_dir` | `/usr/local/lib/ansible-logstash` | Where native libraries from jars are unpacked and trusted |
 
 The helper is written and trusted before any pipeline is validated. The plugin directory holds
 thousands of files, so refreshing entries after a plugin change takes a while; a fapolicyd rule for
 that directory is the lighter alternative, in which case set `logstash_fapolicyd_trust_paths` to the
-helper alone. A rolling upgrade rewrites the entries too, on each host after its plugins are updated
-and before Logstash starts again.
+helper alone. A rolling upgrade rewrites the entries too, on each host after the new package is installed and its
+plugins are updated, and before Logstash starts again.
+
+**Plugin installs and updates.** `logstash-plugin` runs as root, and fapolicyd's default rules let
+trusted programs run by root open anything, so installs and updates themselves are not blocked.
+But fapolicyd trusts files by path, size and checksum, and an update puts files it has never seen
+into new gem directories, which the `logstash` user cannot load. What the role does about it:
+
+- It rewrites the entries after any install, update or removal, before it validates pipelines or
+  restarts Logstash. Logstash keeps running the old release until the rolling restart.
+- A run that stops between the update and the rewrite, or a change made by hand with
+  `logstash-plugin` or the package manager, leaves entries that no longer match. Next to the trust
+  file, in `/etc/fapolicyd/ansible-logstash.ansible.json`, the role records what the entries were
+  written for: the installed package, a checksum of `Gemfile.lock`, and the paths it trusts. It
+  rewrites them on the next run when any of these differs.
+- The denials are audited, so `ausearch -m fanotify -ts recent` shows them while the entries are
+  out of date.
 
 The entries go in a file of their own under `/etc/fapolicyd/trust.d/`, which needs fapolicyd 1.1 or
 newer (RHEL 9 and 10 both ship that). Set `logstash_fapolicyd_trust: false` on anything older and manage
@@ -559,7 +608,7 @@ Not covered by containers:
 - SELinux file contexts and fapolicyd trust entries, which need virtual machines with SELinux enforcing and fapolicyd running;
 - FIPS mode;
 - Red Hat Satellite repositories;
-- plugin installs and updates, which download from rubygems.org.
+- plugin installs and updates, which download from rubygems.org (see `kvm-fapolicyd` below).
 
 ### On KVM virtual machines
 
@@ -573,8 +622,13 @@ as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
 [`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
 VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
 
+[`molecule/kvm-fapolicyd/`](molecule/kvm-fapolicyd/) runs one AlmaLinux 10 VM with fapolicyd
+running. It installs an old release of `logstash-filter-tld`, updates it with
+`logstash_plugins_update`, and checks that Logstash runs the new release with nothing denied and that
+the trust entries are rewritten only when the plugins changed. It downloads from rubygems.org.
+
 ```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604; do molecule test -s "$s" || break; done
+for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd; do molecule test -s "$s" || break; done
 ```
 
 The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
