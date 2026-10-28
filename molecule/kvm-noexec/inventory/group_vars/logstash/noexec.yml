@@ -1,0 +1,5 @@
+---
+# A plugin that is not bundled with Logstash, so converge runs
+# logstash-plugin install, which loads JRuby's FFI library like the service.
+logstash_plugins:
+  - logstash-filter-tld

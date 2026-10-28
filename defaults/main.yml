@@ -78,6 +78,13 @@ logstash_path_logs: /var/log/logstash
 logstash_heap_size: "1g"
 # Extra lines appended to jvm.options, e.g. ["-XX:MaxDirectMemorySize=2g"]
 logstash_jvm_options: []
+# Java's temporary directory (java.io.tmpdir) for the service and for the
+# logstash-plugin and logstash-keystore commands this role runs. JRuby's FFI
+# unpacks a native library there on every start and Logstash cannot start
+# without it, so it must not be mounted noexec, as /tmp is on STIG-hardened
+# hosts. Created by the role, owned by logstash. Empty leaves Java's default,
+# /tmp.
+logstash_tmp_dir: "{{ logstash_path_data }}/tmp"
 
 # =============================================================================
 # Node settings (logstash.yml)
