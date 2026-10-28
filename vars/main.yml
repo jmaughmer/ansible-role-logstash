@@ -115,7 +115,9 @@ _ls_fapolicyd_rpm_patterns: ["*.so", "*.so.*", jspawnhelper, jexec]
 _ls_fapolicyd_fingerprint_argv:
   - /bin/bash
   - -c
-  - set -o pipefail; { rpm -q logstash; cat "$1/Gemfile.lock"; } | sha256sum | cut -d ' ' -f 1
+  - >-
+    set -o pipefail; { rpm -q logstash 2>/dev/null || dpkg-query -W logstash;
+    cat "$1/Gemfile.lock"; } | sha256sum | cut -d ' ' -f 1
   - fapolicyd-fingerprint
   - "{{ logstash_home }}"
 _ls_fapolicyd_spec: >-
