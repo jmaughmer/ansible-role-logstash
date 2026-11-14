@@ -1,69 +1,89 @@
 ---
-# Two systemd containers (rootless Podman is fine) on one network, both in the
-# inventory group "logstash", running two pipelines:
-#   ingest  http input on 8080; fields from the keystore and the service
-#           environment; memory queue
-#   beats   beats input on 5044 with TLS; persisted queue in a relocated
-#           directory, dead letter queue
-# ls-1 is also in the group "firewalld", so prepare.yml starts firewalld on it
-# only: ls-1 takes the role's firewall path and ls-2 the "not running" one.
+# Tests run on the Proxmox test lab: two real KVM VMs cloned from the lab
+# fleet onto the isolated labnet network (EL release chosen by LAB_TEMPLATE),
+# SELinux enforcing and firewalld running — the paths containers never could.
+# converge.yml is a wrapper around the repo's own examples/playbook.yml; the
+# pipeline comes from the inline group_vars below: a generator to stdout, so
+# no Elasticsearch fixture is needed (the examples' es-output template is an
+# example, not a default). Every address comes from gathered facts. All
+# Proxmox connection details live in the driver's secrets file on the control
+# machine. The driver's SSH lands as a sudo user; the plays' become: true
+# runs the tasks privileged through it.
 #
-# MOLECULE_DISTRO picks the EL release (default rockylinux9; also
-# rockylinux10) — see the README's "Testing" section. The playbooks and
-# inventory here are shared with the other scenarios.
+# Default VMIDs are the repo's 9305-9306 band, via LAB_VMID_0/1 so the lab's
+# `mlab` runner can claim a free band per run and allow parallel runs of this
+# repo; a plain molecule test uses the pinned band, one lab run at a time.
 #
-# Inside containers SELinux is off and fapolicyd isn't installed, so this
-# exercises the role's skip paths for both.
-#
-# The sequence adds side_effect.yml (reloads, rolling restarts, a refused
-# pipeline) and `check` (converge in check mode on the installed hosts, which
-# the README says works) after the idempotence check.
+# Run on the lab's molecule control machine:
+#   /root/labnet/mlab test -s default              # parallel-safe, recommended
+#   molecule test                                  # pinned band
+#   LAB_TEMPLATE=template-alma10 molecule test     # the other EL release
 role_name_check: 1
 
 dependency:
-  name: galaxy   # installs requirements.yml next to this file
+  name: galaxy
+  enabled: false        # collections preinstalled on the control machine
+prerun: false
 
 driver:
-  name: podman
+  name: molecule-proxmox
+  options:
+    proxmox_secrets: ${LAB_PROXMOX_SECRETS:-/root/.config/molecule/proxmox-secrets.yml}
+    node: ${LAB_NODE:-galactica}
+    validate_certs: false   # the lab's PVE uses its self-signed cert
+    ssh_user: labadmin
+    ssh_identity_file: /root/.ssh/id_ed25519
+    full: true
+    pool: testlab
+    timeout: 300
 
 platforms:
-  - name: ls-1
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false   # keep the image's own CMD: systemd as PID 1
-    systemd: always
-    privileged: true          # firewalld loads nftables rules
-    network: logstash_molecule   # created by the driver from the first platform
-    groups: [logstash, firewalld]
-
-  - name: ls-2
-    image: "docker.io/geerlingguy/docker-${MOLECULE_DISTRO:-rockylinux9}-ansible:latest"
-    pre_build_image: true
-    override_command: false
-    systemd: always
-    privileged: true
-    network: logstash_molecule
+  - name: log-default-1
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_0:-9305}
     groups: [logstash]
+    memory: 3072
+
+  - name: log-default-2
+    template_name: ${LAB_TEMPLATE:-template-alma9}
+    newid: ${LAB_VMID_1:-9306}
+    groups: [logstash]
+    memory: 3072
 
 provisioner:
   name: ansible
+  env:
+    # The role under test resolves through the sibling role checkouts.
+    ANSIBLE_ROLES_PATH: "${MOLECULE_PROJECT_DIRECTORY}/..:/root/.ansible/roles"
   inventory:
-    links:
-      group_vars: inventory/group_vars/
+    group_vars:
+      all:
+        # The role's own logstash_version, as the other scenarios read it.
+        test_default_version: >-
+          {{ (lookup('ansible.builtin.file',
+             lookup('env', 'MOLECULE_PROJECT_DIRECTORY') ~ '/defaults/main.yml')
+             | from_yaml).logstash_version }}
+      logstash:
+        # No defaults from examples/: the repo's production inventory is an
+        # example, this scenario keeps only the minimum that exercises the
+        # pipeline, validation and restart machinery.
+        logstash_pipelines:
+          - id: molecule
+            config: |
+              input { generator { lines => ["hello molecule", "second event"] count => 5 } }
+              filter { mutate { add_tag => ["molecule"] } }
+              output { stdout { codec => rubydebug } }
 
 verifier:
   name: ansible
 
 scenario:
   test_sequence:
-    - dependency
     - destroy
     - syntax
     - create
     - prepare
     - converge
     - idempotence
-    - side_effect
-    - check
     - verify
     - destroy

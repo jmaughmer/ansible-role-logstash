@@ -1,96 +1,37 @@
 ---
-# The images are minimal: without iproute there are no network facts (the
-# verification sends events to the other host's address), and without the
-# openssl CLI the role cannot convert keys to PKCS#8.
-- name: Prepare
+# Runs once, after the VMs are created: gets the boxes ansible-ready. The
+# lab templates self-configure labnet DNS since 2026-11-13, but the
+# resolv.conf task cures a DHCP hiccup and the dnf priming keeps a
+# boot-time DNS stall from killing the first metadata fetch. Privilege comes
+# from become: true on the play (the driver's SSH lands as a sudo user).
+- name: Get the VMs ready for ansible-core
   hosts: all
   gather_facts: false
+  become: true
   tasks:
-    - name: Read the distribution
-      ansible.builtin.setup:
-        gather_subset: [min]
+    - name: Wait for SSH to be up after first boot
+      ansible.builtin.wait_for_connection:
 
-    - name: Install iproute and openssl
-      ansible.builtin.dnf:
-        name: [iproute, openssl]
-        state: present
-      when: ansible_facts['os_family'] == 'RedHat'
+    # The AlmaLinux cloud templates were first booted on the LAN, so they can
+    # carry a stale /etc/resolv.conf that EL9's cloud images never update
+    # (NM dns=none; cloud-init owns the file). Rewrite it from the lease.
+    - name: Point resolv.conf at the labnet DNS from DHCP
+      ansible.builtin.raw: |
+        gw=$(ip -4 route | awk '/default via/ {print $3; exit}')
+        test -n "$gw"
+        dns=""
+        for d in $(nmcli -t -f IP4.DNS device show eth0 | cut -d: -f2); do
+          [ "$d" = "$gw" ] && dns=$d
+        done
+        printf 'nameserver %s\n' "${dns:-$gw}" > /etc/resolv.conf
+      changed_when: true
 
-    - name: Install iproute2 and openssl
-      ansible.builtin.apt:
-        name: [iproute2, openssl]
-        state: present
-        update_cache: true
-      when: ansible_facts['os_family'] == 'Debian'
-
-    # Stands in for a certificate delivered by another role: the role copies
-    # it from this path on the host. The key is encrypted, so the role has to
-    # use the passphrase to make the PKCS#8 copy the beats input reads.
-    - name: Create the TLS directory
-      ansible.builtin.file:
-        path: "{{ test_tls_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0700"
-
-    - name: Issue a self-signed certificate
-      ansible.builtin.command:
-        argv:
-          - openssl
-          - req
-          - -x509
-          - -newkey
-          - rsa:2048
-          - -keyout
-          - "{{ test_tls_dir }}/molecule.key"
-          - -passout
-          - "pass:{{ test_tls_passphrase }}"
-          - -out
-          - "{{ test_tls_dir }}/molecule.crt"
-          - -days
-          - "30"
-          - -subj
-          - "/CN={{ inventory_hostname }}"
-          - -addext
-          - "subjectAltName=DNS:{{ inventory_hostname }},IP:127.0.0.1"
-        creates: "{{ test_tls_dir }}/molecule.crt"
-
-# firewalld running on ls-1 means the role's firewall tasks open the ports
-# there, while ls-2 reports there is nothing to add them to. On Ubuntu ls-1
-# runs ufw instead, Ubuntu's own firewall, which denies incoming connections
-# by default; SSH stays open for Ansible.
-- name: Start firewalld
-  hosts: firewalld
-  gather_facts: false
-  tasks:
-    - name: Install firewalld
-      ansible.builtin.dnf:
-        name: firewalld
-        state: present
-      when: ansible_facts['os_family'] == 'RedHat'
-
-    - name: Start firewalld
-      ansible.builtin.systemd_service:
-        name: firewalld
-        state: started
-        enabled: true
-      when: ansible_facts['os_family'] == 'RedHat'
-
-    - name: Install ufw
-      ansible.builtin.apt:
-        name: ufw
-        state: present
-      when: ansible_facts['os_family'] == 'Debian'
-
-    - name: Allow SSH through ufw
-      community.general.ufw:
-        rule: allow
-        port: "22"
-        proto: tcp
-      when: ansible_facts['os_family'] == 'Debian'
-
-    - name: Enable ufw
-      community.general.ufw:
-        state: enabled
-      when: ansible_facts['os_family'] == 'Debian'
+    # Labnet DNS can hiccup while several VMs boot at once, which used to
+    # kill a first dnf call (Curl error 6). Prime name and metadata here with
+    # bounded retries; the role's dnf then finds fresh metadata.
+    - name: Prime DNS and dnf metadata
+      ansible.builtin.raw: >-
+        /bin/sh -c "for i in 1 2 3 4 5; do
+        if getent hosts mirrors.almalinux.org && dnf -y -q makecache;
+        then exit 0; fi; sleep 10; done; exit 1"
+      changed_when: false

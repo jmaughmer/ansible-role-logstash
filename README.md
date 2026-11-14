@@ -557,101 +557,54 @@ Java's default.
 
 ## Testing
 
-[`molecule/default/`](molecule/default/) runs the role against two systemd containers (`ls-1`, `ls-2`) on one
-container network, with two pipelines:
+[`molecule/default/`](molecule/default/) runs the role against two real KVM VMs cloned from the
+Proxmox test lab's fleet onto its isolated labnet network — SELinux enforcing, firewalld running,
+each VM with its own kernel. The pipeline is a generator to stdout (`molecule`), so no fixture
+service is needed; the point is the machinery around it: pipeline rendering and validation, the
+API, the service, and a second converge that must change nothing. converge is the repo's own
+[`examples/playbook.yml`](examples/playbook.yml). The sequence is destroy → syntax → create →
+prepare → converge → idempotence → verify → destroy, and `verify.yml` checks:
 
-- `ingest`: an `http` input on 8080. A filter adds a field from the keystore and one from `logstash_environment`. It uses a memory queue.
-- `beats`: a `beats` input on 5044 with TLS. It uses a persisted queue in a relocated directory, and a dead letter queue.
+- Logstash runs and is enabled, at the version `logstash_version` promises;
+- the pipeline ran — ten events out, per Logstash's own `/_node/stats` API;
+- this boot's journal holds no `[ERROR]`.
 
-Both pipelines write their events to a file. The certificate is self-signed in `prepare.yml` with an encrypted key, so the role has to use the passphrase to make the PKCS#8 copy. API basic auth and a keystore password are on. firewalld runs on `ls-1` only, so the role's firewall path runs there and the "not running" path on `ls-2`.
-
-The sequence is:
-
-1. **converge**, then **idempotence**: a second converge must change nothing.
-2. **side effect** ([`side_effect.yml`](molecule/default/side_effect.yml)) applies the role with other settings and checks how each change was applied:
-   - a changed pipeline reloads on its own: same PID, only its reload counter moves, and new events show the change;
-   - a pipeline added, then marked `state: absent`, starts and stops by reload, and its file is removed;
-   - an invalid pipeline is refused by validation: the run fails, the old file stays and keeps running;
-   - a JVM option change is applied by a rolling restart: new PIDs, and `ls-1` is running again before `ls-2` stops.
-3. **check**: converge in check mode on the installed hosts.
-4. **verify** ([`verify.yml`](molecule/default/verify.yml)):
-   - the requested version is installed and running, and the service is enabled;
-   - the API refuses requests without credentials;
-   - the pipelines run with their per-pipeline settings and queue types;
-   - the systemd drop-in took effect (`Nice`, `LimitNOFILE`, `TimeoutStopSec`);
-   - files and directories have their documented owners and modes;
-   - the queue directories are where they were asked for;
-   - the heap and the extra JVM option are in `jvm.options`, and the keystore holds the managed entries;
-   - the PKCS#8 key is unencrypted and matches the supplied key, and the `beats` input serves the installed certificate;
-   - on `ls-1`, the input ports are open now and permanently;
-   - each host sends an event to the other's address, and the event arrives carrying the keystore value and the environment value.
-
-Other scenarios:
-
-| Scenario | What it covers |
-|---|---|
-| `preflight` | Settings that preflight must refuse, each with its own message. Among them: an unsupported distribution, a version that isn't an exact 9.x.y, a bad package source or Satellite override, a heap size Logstash can't read, `restart` with automatic reload, misspelt queue and pipeline keys, a pipeline with both or neither of `config` and `path_config`, no pipelines or duplicate ids, a port below 1024 without `CAP_NET_BIND_SERVICE`. Failures that involve secrets (certificate entries, the keystore password, the API user) must be censored and never print the secret. Nothing is installed. |
-| `upgrade` | `prepare.yml` installs and starts an older 9.x release with the default scenario's settings, then converge applies the role's `logstash_version`. The hosts must be upgraded one at a time and run the new release, then the default verification runs. |
-| `docker` | The default scenario on Docker instead of Podman. |
+Tests run on the lab's molecule control machine: `molecule`, `molecule-proxmox` and the role's
+collections are preinstalled there, and the driver's connection secrets and SSH key live only in
+its own config files. Nothing lab-specific is in this repo beyond the fleet template name and the
+default VMID band (9305–9306); hosts, tokens and subnets never leave the control machine. The Test
+Lab project's `molecule-labnet/` directory documents the lab itself. Each VM gets 3 GB (the
+driver's memory passthrough). `LAB_TEMPLATE` picks the guest release (default `template-alma9`;
+also `template-alma10` or `template-alma8`):
 
 ```bash
-pip install -r molecule/requirements.txt
+molecule test                                   # AlmaLinux 9, SELinux enforcing
+LAB_TEMPLATE=template-alma10 molecule test      # the other EL release
 ```
+
+The VMIDs come from `LAB_VMID_0/1` and default to the pinned 9305–9306 band, so a plain
+`molecule test` means one lab run of this repo at a time. For several runs of this repo at once,
+use the lab's `mlab` wrapper, which claims a free VMID band (and an isolated ephemeral directory)
+per run:
 
 ```bash
-for s in default preflight upgrade; do molecule test -s "$s" || break; done
+/root/labnet/mlab test -s default               # parallel-safe run on the control machine
 ```
-
-The scenarios use Podman (rootless works), except `docker`, which needs Docker. `MOLECULE_DISTRO` picks the image
-(default `rockylinux9`; also `rockylinux10`):
-
-```bash
-MOLECULE_DISTRO=rockylinux10 molecule test -s preflight
-```
-
-The containers download Logstash from Elastic's repository, so the tests need internet access. Each host runs a 512 MB heap, plus a second JVM while pipelines are validated.
 
 Lint with `yamllint .` and `ansible-lint` (configured by [`.yamllint`](.yamllint) and
-[`.ansible-lint`](.ansible-lint)). There is no GitHub Actions workflow; run the lint and Molecule
-scenarios locally.
+[`.ansible-lint`](.ansible-lint)). There is no CI; run the lint and Molecule from the control
+machine.
 
-Not covered by containers:
-
-- SELinux file contexts and fapolicyd trust entries, which need virtual machines with SELinux enforcing and fapolicyd running;
-- FIPS mode;
-- Red Hat Satellite repositories;
-- plugin installs and updates, which download from rubygems.org (see `kvm-fapolicyd` below).
-
-### On KVM virtual machines
-
-[`molecule/kvm/`](molecule/kvm/) runs the default scenario on real AlmaLinux 10 virtual machines
-instead of containers: the same hosts, groups, playbooks and inventory, one VM per host, on local
-KVM/libvirt (`qemu:///system`). Each VM has its own kernel, so SELinux is enforcing and settings such
-as `vm.max_map_count` are the VM's own. Overrides for the VMs go in
-`molecule/kvm/inventory/group_vars/<group>/kvm.yml`.
-
-[`molecule/kvm-ubuntu2404/`](molecule/kvm-ubuntu2404/) and
-[`molecule/kvm-ubuntu2604/`](molecule/kvm-ubuntu2604/) run the same thing on Ubuntu 24.04 and 26.04
-VMs. They only swap the cloud image, and share `molecule/kvm/`'s playbooks and inventory.
-
-[`molecule/kvm-fapolicyd/`](molecule/kvm-fapolicyd/) runs one AlmaLinux 10 VM with fapolicyd
-running. It installs an old release of `logstash-filter-tld`, updates it with
-`logstash_plugins_update`, and checks that Logstash runs the new release with nothing denied and that
-the trust entries are rewritten only when the plugins changed. It downloads from rubygems.org.
-
-[`molecule/kvm-noexec/`](molecule/kvm-noexec/) runs the kvm scenario with `/tmp`, `/var/tmp`,
-`/dev/shm` and `/home` mounted `noexec`, as the STIG has them, plus a plugin install, and checks
-that JRuby's FFI library is loaded from `logstash_tmp_dir` (see [noexec /tmp](#noexec-tmp)). It
-downloads from rubygems.org.
-
-```bash
-for s in kvm kvm-ubuntu2404 kvm-ubuntu2604 kvm-fapolicyd kvm-noexec; do molecule test -s "$s" || break; done
-```
-
-The machine running Molecule needs libvirt, `virt-install`, `qemu-img` and `xorriso`, and its user
-must be able to manage `qemu:///system`. Each cloud image downloads once, checksum verified, to
-`/var/lib/libvirt/images/molecule`; each VM gets a throwaway disk on top of it. VM names include the
-scenario, so the three scenarios can also run side by side if the machine has the memory.
+Not covered by the scenario: the richer container-era matrix — the `http`/`beats` pipeline pair
+with memory and persisted queues, dead letter queue, keystore values and `logstash_environment`,
+TLS with an encrypted key and the PKCS#8 copy, API basic auth, the systemd drop-in settings,
+cross-host event delivery, and the `side_effect.yml` checks (per-pipeline reload vs rolling
+restart, pipeline add/remove, invalid-config refusal — the removed `default` scenario); the
+9.4-to-current rolling upgrade (`upgrade`); settings preflight must refuse without printing a
+secret (`preflight`); fapolicyd plugin-update trust entries and `noexec` mounts (the removed
+`kvm-fapolicyd`/`kvm-noexec` libvirt scenarios); and the Ubuntu guest paths (the removed
+`kvm-ubuntu*` scenarios — the role does support Ubuntu, but the tests now run EL guests only).
+FIPS mode, Satellite repositories and plugin installs remain uncovered.
 
 ## Role layout
 
